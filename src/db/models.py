@@ -1,8 +1,7 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.orm import relationship
 from datetime import datetime
-
-Base = declarative_base()
+from src.db.database import Base
 
 class Session(Base):
     __tablename__ = 'sessions'
@@ -37,10 +36,12 @@ class Comment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     post = relationship("Post", back_populates="comments")
-    replies = relationship("Comment", back_populates="parent", remote_side=[id])
-    parent = relationship("Comment", back_populates="replies", remote_side=[parent_id])
+    replies = relationship("Comment", backref="parent", remote_side=[id])
 
 class BotState(Base):
     __tablename__ = 'bot_states'
-    bot_name = Column(String, primary_key=True, index=True)
-    current_anger = Column(Integer, default=0)
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, unique=True, index=True)
+    persona = Column(String)
+    anger_targets = Column(String, default="{}") # JSON string mapping target bot to anger value
+    created_at = Column(DateTime, default=datetime.utcnow)

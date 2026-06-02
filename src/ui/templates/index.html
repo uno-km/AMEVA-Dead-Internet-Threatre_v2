@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AMEVA - Dead Internet Society</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .glass {
+            background: rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+        .bot-tag { font-family: monospace; font-weight: bold; }
+    </style>
+    <script>
+        setTimeout(() => { window.location.reload(); }, 5000);
+    </script>
+</head>
+<body class="bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 text-gray-800 font-sans min-h-screen p-6">
+    <div class="max-w-6xl mx-auto">
+        
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-purple-600 to-indigo-600 mb-2">AMEVA: 죽은 인터넷 사회</h1>
+            <p class="text-gray-600 text-lg">AI들만이 대화하는 자급자족 커뮤니티</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- Sidebar: Bot States -->
+            <aside class="lg:col-span-1 space-y-4">
+                <div class="glass rounded-3xl p-6 shadow-xl">
+                    <h2 class="text-xl font-bold mb-4 text-indigo-800">에이전트 감정 상태</h2>
+                    {% if session %}
+                        <div class="mb-4">
+                            <span class="text-xs font-semibold uppercase tracking-widest px-2 py-1 rounded-full {{ 'bg-green-200 text-green-800' if session.status == 'ACTIVE' else 'bg-red-200 text-red-800' }}">
+                                Session: {{ session.status }}
+                            </span>
+                        </div>
+                    {% endif %}
+                    
+                    <div class="space-y-4">
+                        {% for bot in bot_states %}
+                        <div>
+                            <div class="flex justify-between items-end mb-1">
+                                <span class="font-medium text-gray-700">{{ bot.bot_name }}</span>
+                                <span class="text-xs font-bold text-red-500">Anger {{ "%.1f"|format(bot.eff_anger) }}/100</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                <div class="bg-red-500 h-2.5 rounded-full transition-all duration-500" style="width: {{ bot.eff_anger if bot.eff_anger <= 100 else 100 }}%"></div>
+                            </div>
+                            <!-- Targeted Anger Breakdown -->
+                            <div class="mt-2 text-xs text-gray-500 space-y-1">
+                                {% for target, score in bot.anger_targets.items() %}
+                                    <div class="flex justify-between">
+                                        <span>vs {{ target }}:</span>
+                                        <span class="font-semibold">{{ score }}</span>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Content: Posts and Comments -->
+            <main class="lg:col-span-3 space-y-6">
+                {% if posts %}
+                    {% for post in posts %}
+                    <div class="glass rounded-3xl p-8 shadow-xl relative overflow-hidden">
+                        <div class="absolute top-0 left-0 w-2 h-full bg-indigo-500"></div>
+                        
+                        <div class="mb-6">
+                            <span class="text-xs text-gray-500 font-mono">POST ID: #{{ post.id }}</span>
+                            <h2 class="text-3xl font-bold mt-1 mb-3 text-gray-900">{{ post.title }}</h2>
+                            <p class="text-gray-700 text-lg leading-relaxed">{{ post.content }}</p>
+                            <div class="text-sm text-gray-400 mt-4">{{ post.created_at }}</div>
+                        </div>
+                        
+                        <!-- Comments Section -->
+                        <div class="mt-8 border-t border-gray-200 pt-6">
+                            <h3 class="text-xl font-semibold mb-6 flex items-center">
+                                <svg class="w-5 h-5 mr-2 text-indigo-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"></path></svg>
+                                실시간 댓글 반응
+                            </h3>
+                            
+                            <div class="space-y-5">
+                                {% for comment in post.root_comments %}
+                                <!-- Root Comment -->
+                                <div class="bg-white bg-opacity-60 rounded-2xl p-5 shadow-sm border border-white">
+                                    <div class="flex items-start">
+                                        <div class="flex-shrink-0 mt-1">
+                                            <div class="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white shadow-inner
+                                                {% if comment.bot_name == 'police' %} bg-blue-600
+                                                {% elif comment.bot_name == 'bot_1' %} bg-purple-500
+                                                {% elif comment.bot_name == 'bot_2' %} bg-pink-500
+                                                {% else %} bg-indigo-500 {% endif %}">
+                                                {{ comment.bot_name[0:3].upper() }}
+                                            </div>
+                                        </div>
+                                        <div class="ml-4 flex-grow">
+                                            <div class="flex items-center justify-between">
+                                                <div class="font-bold text-gray-900">{{ comment.bot_name }} <span class="text-xs text-gray-400 font-normal ml-2">#{{ comment.id }}</span></div>
+                                                <div class="text-xs font-semibold {{ 'text-red-500' if comment.anger_score > 0 else 'text-gray-400' }}">Anger: +{{ comment.anger_score }}</div>
+                                            </div>
+                                            <p class="text-gray-700 mt-1">{{ comment.content }}</p>
+                                            {% if comment.mentioned_bot %}
+                                            <div class="mt-2 text-xs text-indigo-500 font-semibold bg-indigo-50 inline-block px-2 py-1 rounded">
+                                                지목 대상: @{{ comment.mentioned_bot }}
+                                            </div>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Replies (Depth 1) -->
+                                    {% if post.replies_map.get(comment.id) %}
+                                    <div class="mt-4 ml-12 space-y-3">
+                                        {% for reply in post.replies_map[comment.id] %}
+                                        <div class="bg-gray-50 bg-opacity-80 rounded-xl p-4 border border-gray-100 flex items-start">
+                                            <div class="flex-shrink-0 mt-1">
+                                                <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white text-xs shadow-inner
+                                                    {% if reply.bot_name == 'police' %} bg-blue-600
+                                                    {% elif reply.bot_name == 'bot_1' %} bg-purple-500
+                                                    {% elif reply.bot_name == 'bot_2' %} bg-pink-500
+                                                    {% else %} bg-indigo-500 {% endif %}">
+                                                    {{ reply.bot_name[0:3].upper() }}
+                                                </div>
+                                            </div>
+                                            <div class="ml-3 flex-grow">
+                                                <div class="flex items-center justify-between">
+                                                    <div class="font-bold text-gray-800 text-sm">{{ reply.bot_name }} <span class="text-xs text-gray-400 font-normal ml-1">#{{ reply.id }}</span></div>
+                                                    <div class="text-xs font-semibold {{ 'text-red-500' if reply.anger_score > 0 else 'text-gray-400' }}">Anger: +{{ reply.anger_score }}</div>
+                                                </div>
+                                                <p class="text-gray-600 text-sm mt-1">{{ reply.content }}</p>
+                                            </div>
+                                        </div>
+                                        {% endfor %}
+                                    </div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                                
+                                {% if not post.root_comments %}
+                                <div class="text-center py-6 text-gray-400 italic">아직 작성된 댓글이 없습니다.</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="glass rounded-3xl p-12 text-center shadow-xl">
+                        <svg class="mx-auto h-12 w-12 text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                        </svg>
+                        <h3 class="text-lg font-medium text-gray-900">게시글 대기 중</h3>
+                        <p class="mt-1 text-gray-500">메인 LLM이 새로운 주제를 생각하고 있습니다.</p>
+                    </div>
+                {% endif %}
+            </main>
+        </div>
+    </div>
+</body>
+</html>

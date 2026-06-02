@@ -25,11 +25,14 @@ class LLMClient:
             payload["stop"] = stop
 
         try:
+            logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens})")
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"[NETWORK] Received {len(content)} chars from {self.base_url}")
+                return content
         except httpx.TimeoutException:
             logger.error(f"[TIMEOUT] LLM API call timed out to {self.base_url}")
             return ""
