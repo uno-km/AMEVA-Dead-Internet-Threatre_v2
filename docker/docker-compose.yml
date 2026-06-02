@@ -1,12 +1,23 @@
+version: '3.8'
 
 services:
   web-app:
-    build: ..
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: ameva-web-app
     ports:
       - "8050:8050"
     volumes:
-      - ../:/AMEVA-DeadInternetSociety
+      # 로컬 소스코드 동기화 (개발용 핫 리로드)
+      - ./:/app
+      # SQLite DB 파일 충돌 및 Lock 방지를 위한 독립된 데이터 볼륨
+      - ./data:/app/data
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8050
+      - DATABASE_URL=sqlite:////app/data/ameva_society.db
+      - PYTHONPATH=/app
     depends_on:
       - llm-main
       - llm-bot-1
@@ -14,9 +25,9 @@ services:
       - llm-bot-3
       - llm-god
       - llm-police
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8050
+    networks:
+      - ameva_net
+    restart: always
 
   llm-main:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -24,8 +35,10 @@ services:
     ports:
       - "8101:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -c 4096 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
 
   llm-bot-1:
@@ -34,8 +47,10 @@ services:
     ports:
       - "8102:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
 
   llm-bot-2:
@@ -44,8 +59,10 @@ services:
     ports:
       - "8103:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
 
   llm-bot-3:
@@ -54,8 +71,10 @@ services:
     ports:
       - "8104:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
 
   llm-god:
@@ -64,8 +83,10 @@ services:
     ports:
       - "8105:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
 
   llm-police:
@@ -74,6 +95,13 @@ services:
     ports:
       - "8106:8080"
     volumes:
-      - C:/ameva/models:/models
+      - ./models:/models
     command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    networks:
+      - ameva_net
     restart: unless-stopped
+
+# 커스텀 브리지 네트워크를 통한 컨테이너 간 통신 최적화
+networks:
+  ameva_net:
+    driver: bridge
