@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(n
 logger = logging.getLogger("Orchestrator")
 
 main_llm = LLMClient("http://llm-main:8080")
-police_llm = LLMClient("http://llm-police:8080")
+#police_llm = LLMClient("http://llm-police:8080")
 god_llm = LLMClient("http://llm-god:8080")
 
 bots = {
@@ -57,7 +57,14 @@ def docker_stop(container_name: str) -> bool:
         logger.info(f"[DOCKER] stop ok: {result.stdout.strip()}")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"[DOCKER] stop failed: {e.stderr.strip()}")
+        stderr = (e.stderr or "").strip()
+        stdout = (e.stdout or "").strip()
+
+        if "is not running" in stderr or "is not running" in stdout:
+            logger.info(f"[DOCKER] stop skipped: {container_name} already stopped")
+            return True
+
+        logger.error(f"[DOCKER] stop failed: {stderr or stdout}")
         return False
 
 
@@ -623,14 +630,25 @@ def normalize_post_content(text: str) -> str:
     except Exception as e:
         logger.warning(f"[POST WARNING] Failed to normalize post content: {e}")
         return ""
+
 async def create_post_with_main_llm(db, session):
     logger.info("[ROUTING] Requesting llm-main (8B) to generate a new topic...")
 
-    post_content = await main_llm.generate_completion(
-        "너는 커뮤니티의 익명 게시글 작성자다. 무작위의 논쟁적인 주제로 짧은 글을 하나 작성해라. 한국어로만 작성해라.",
-        "새로운 글을 작성해줘.",
-        max_tokens=300
-    )
+    post_content = ""
+
+    try:
+        llm_ready = await ensure_llm_main_ready()
+        if not llm_ready:
+            logger.warning("[LLM-MAIN] main container was not ready. Falling back to static topics.")
+        else:
+            post_content = await main_llm.generate_completion(
+                "너는 커뮤니티의 익명 게시글 작성자다. 무작위의 논쟁적인 주제로 짧은 글을 하나 작성해라. 한국어로만 작성해라.",
+                "새로운 글을 작성해줘.",
+                max_tokens=300
+            )
+    finally:
+        # 글 생성 시도 후에는 항상 내려서 리소스 절약
+        stop_llm_main_if_running()
 
     post_content = normalize_post_content(post_content)
 
@@ -653,11 +671,8 @@ async def create_post_with_main_llm(db, session):
     db.refresh(post)
 
     logger.info(f"[POST] Created post id={post.id}")
-    
-    # 글 저장 후 바로 llm-main 종료해서 리소스 절약
-    stop_llm_main_if_running()
-
     return post
+
 
 async def run_session():
     db = SessionLocal()
