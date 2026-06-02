@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  web-app:
+    build: ..
+    container_name: ameva-web-app
+    ports:
+      - "8050:8050"
+    volumes:
+      - ../:/AMEVA-DeadInternetSociety
+    depends_on:
+      - llm-main
+      - llm-bot-1
+      - llm-bot-2
+      - llm-bot-3
+      - llm-god
+      - llm-police
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8050
+
+  llm-main:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-main
+    ports:
+      - "8081:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -c 4096 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
+
+  llm-bot-1:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-bot-1
+    ports:
+      - "8082:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
+
+  llm-bot-2:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-bot-2
+    ports:
+      - "8083:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
+
+  llm-bot-3:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-bot-3
+    ports:
+      - "8084:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
+
+  llm-god:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-god
+    ports:
+      - "8085:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/qwen1_5-1_8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
+
+  llm-police:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: ameva-llm-police
+    ports:
+      - "8086:8080"
+    volumes:
+      - C:/ameva/models:/models
+    command: -m /models/qwen1_5-1_8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    restart: unless-stopped
