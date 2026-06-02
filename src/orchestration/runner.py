@@ -4,6 +4,12 @@ import random
 import re
 import json
 import math
+
+import subprocess
+import time
+import urllib.request
+import urllib.error
+
 import psutil
 from datetime import datetime
 from src.db.database import SessionLocal
@@ -24,6 +30,114 @@ bots = {
     "bot_2": LLMClient("http://llm-bot-2:8080"),
     "bot_3": LLMClient("http://llm-bot-3:8080")
 }
+
+def docker_start(container_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "start", container_name],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.info(f"[DOCKER] start ok: {result.stdout.strip()}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[DOCKER] start failed: {e.stderr.strip()}")
+        return False
+
+
+def docker_stop(container_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "stop", container_name],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.info(f"[DOCKER] stop ok: {result.stdout.strip()}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[DOCKER] stop failed: {e.stderr.strip()}")
+        return False
+
+
+async def wait_for_http_ready(url: str, timeout: int = 120, interval: int = 2) -> bool:
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            def _probe():
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    return response.status
+
+            status_code = await asyncio.to_thread(_probe)
+            if 200 <= status_code < 500:
+                logger.info(f"[HEALTH] endpoint ready: {url} status={status_code}")
+                return True
+        except urllib.error.HTTPError as e:
+            # 404여도 서버 프로세스 자체는 살아있을 수 있으니 ready로 볼 수 있음
+            if 400 <= e.code < 500:
+                logger.info(f"[HEALTH] endpoint responding: {url} status={e.code}")
+                return True
+        except Exception:
+            pass
+
+        logger.info(f"[HEALTH] waiting for endpoint: {url}")
+        await asyncio.sleep(interval)
+
+    logger.error(f"[HEALTH] timeout waiting for endpoint: {url}")
+    return False
+
+async def close_session_if_any_metric_exceeded(db, session, threshold: float = 120.0) -> bool:
+    try:
+        states = db.query(BotState).all()
+    except Exception as e:
+        logger.error(f"[THRESHOLD CHECK ERROR] Failed to load BotState rows: {e}")
+        return False
+
+    for s in states:
+        try:
+            metric_dict = safe_json_loads(s.anger_targets, {})
+            if not isinstance(metric_dict, dict):
+                metric_dict = {}
+
+            effective_metric = calculate_effective_anger(metric_dict)
+
+            if effective_metric >= threshold:
+                logger.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                logger.warning(
+                    f"[SESSION CLOSE] {getattr(s, 'bot_name', 'unknown')} exceeded threshold "
+                    f"({effective_metric:.1f} >= {threshold})"
+                )
+                logger.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+                session.status = "CLOSED_BY_THRESHOLD"
+                session.closed_at = datetime.utcnow()
+                session.reason = f"METRIC_THRESHOLD_{int(threshold)}"
+                db.commit()
+                return True
+
+        except Exception as e:
+            logger.warning(
+                f"[THRESHOLD CHECK WARNING] Failed to evaluate metric for "
+                f"bot={getattr(s, 'bot_name', 'unknown')}: {e}"
+            )
+            continue
+
+    return False
+
+async def ensure_llm_main_ready() -> bool:
+    container_name = "ameva-llm-main"
+    ready_url = "http://localhost:8101/health"
+
+    if not docker_start(container_name):
+        return False
+
+    return await wait_for_http_ready(ready_url, timeout=120, interval=2)
+
+
+def stop_llm_main_if_running():
+    docker_stop("ameva-llm-main")
 
 async def smart_sleep():
     """Sleep based on CPU usage to prevent bottlenecking."""
@@ -58,15 +172,14 @@ def calculate_effective_anger(anger_dict: dict) -> float:
 
 async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: list) -> dict:
     """God LLM evaluates targeted anger increases for the spectators.
-    Returns flat int dict:
+    Returns nested dict:
     {
-        "bot_1": 10,
-        "bot_2": 5
+        "bot_1": {"increase": 10, "target": "bot_3"},
+        "bot_2": {"increase": 5, "target": "bot_3"}
     }
     """
     logger.info("[ROUTING] Sending context to God LLM for Targeted Anger Matrix...")
 
-    # 방어 코드: spectators 길이 보장
     if not spectators or len(spectators) < 2:
         logger.error(f"[GOD LLM] spectators 인자가 잘못되었습니다: {spectators}")
         return {}
@@ -79,30 +192,41 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
         f"이 발언을 지켜본 관전자 {spec_1}과(와) {spec_2}가 각각 {speaker}를 향해 얼마나 분노를 느낄지 "
         f"0에서 20 사이의 증가치로 평가해라.\n"
         f"반드시 아래 JSON 형식으로만 대답해라. 절대 다른 말은 추가하지 마라.\n"
-        f"{{\"{spec_1}\": 10, \"{spec_2}\": 5}}"
+        f"{{"
+        f"\"{spec_1}\": {{\"increase\": 10, \"target\": \"{speaker}\"}}, "
+        f"\"{spec_2}\": {{\"increase\": 5, \"target\": \"{speaker}\"}}"
+        f"}}"
     )
 
     result = await god_llm.generate_completion(
         "너는 감정 반응을 수치화하는 평가자다.",
         prompt,
-        max_tokens=120
+        max_tokens=150
     )
 
     val_1, val_2 = 0, 0
+    target_1, target_2 = speaker, speaker
     json_str = None
 
     try:
-        # 방어 코드: None/빈값 대응
         if not result or not isinstance(result, str):
             raise ValueError(f"LLM 응답이 비정상입니다: {result}")
 
-        # 1) ```json ... ``` 코드블록 우선 파싱
-        markdown_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", result, re.DOTALL)
+        candidate = result.strip()
+        # 1) ```json ... ``` 우선
+        
+        markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
         if markdown_match:
-            json_str = markdown_match.group(1)
+            candidate = markdown_match.group(1).strip()
+
+        start_idx = candidate.find("{")
+        end_idx = candidate.rfind("}")
+
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            json_str = candidate[start_idx:end_idx + 1]
         else:
-            # 2) 일반 JSON 오브젝트 fallback
-            fallback_match = re.search(r"\{.*?\}", result, re.DOTALL)
+            # 2) 일반 JSON fallback
+            fallback_match = re.search(r"\{.*\}", result, re.DOTALL)
             if fallback_match:
                 json_str = fallback_match.group(0)
 
@@ -111,54 +235,59 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
 
         data = json.loads(json_str)
 
-        # LLM이 int / str / dict 형태로 비틀어도 최대한 복구
-        def parse_anger_value(raw_val) -> int:
+        def parse_entry(raw_val, default_target):
+            increase = 0
+            target = default_target
+
             if raw_val is None:
-                return 0
+                return increase, target
 
             if isinstance(raw_val, dict):
-                # {"increase": 10} 형태 우선
-                if "increase" in raw_val:
-                    return int(raw_val["increase"])
-                # 혹시 {"bot_1": 10} 같이 이상하게 올 경우
-                if speaker in raw_val:
-                    return int(raw_val[speaker])
-                # dict면 첫 번째 숫자성 value라도 줍줍
-                for v in raw_val.values():
-                    try:
-                        return int(v)
-                    except Exception:
-                        continue
-                return 0
+                # {"increase": 10, "target": "bot_3"}
+                try:
+                    increase = int(raw_val.get("increase", 0))
+                except Exception:
+                    increase = 0
 
+                raw_target = raw_val.get("target", default_target)
+                if isinstance(raw_target, str) and raw_target.strip():
+                    target = raw_target.strip()
+                return increase, target
+
+            # 만약 LLM이 그냥 숫자만 줬으면
             if isinstance(raw_val, (int, float)):
-                return int(raw_val)
+                return int(raw_val), target
 
             if isinstance(raw_val, str):
-                # 문자열 안에서 숫자 추출
                 num_match = re.search(r"-?\d+", raw_val)
                 if num_match:
-                    return int(num_match.group(0))
-                return 0
+                    increase = int(num_match.group(0))
+                return increase, target
 
-            return 0
+            return increase, target
 
-        val_1 = parse_anger_value(data.get(spec_1, 0))
-        val_2 = parse_anger_value(data.get(spec_2, 0))
+        if isinstance(data, dict):
+            val_1, target_1 = parse_entry(data.get(spec_1, 0), speaker)
+            val_2, target_2 = parse_entry(data.get(spec_2, 0), speaker)
 
     except json.JSONDecodeError as e:
         logger.error(f"[GOD LLM PARSE ERROR] JSON 디코딩 실패. Raw: {str(result).strip()} | Error: {e}")
     except Exception as e:
         logger.error(f"[GOD LLM PARSE ERROR] 예상치 못한 파싱 오류. Raw: {str(result).strip()} | Error: {e}")
 
-    # 최종 안전망: 0~20 clamp
+    # clamp
     val_1 = min(max(val_1, 0), 20)
     val_2 = min(max(val_2, 0), 20)
 
-    # Orchestrator와 호환되도록 평면 int 구조 반환
     out = {
-        spec_1: val_1,
-        spec_2: val_2
+        spec_1: {
+            "increase": val_1,
+            "target": target_1 if target_1 in bots else speaker
+        },
+        spec_2: {
+            "increase": val_2,
+            "target": target_2 if target_2 in bots else speaker
+        }
     }
 
     logger.info(f"[GOD LLM] Raw response: {str(result).strip() if result else 'None'}")
@@ -524,6 +653,10 @@ async def create_post_with_main_llm(db, session):
     db.refresh(post)
 
     logger.info(f"[POST] Created post id={post.id}")
+    
+    # 글 저장 후 바로 llm-main 종료해서 리소스 절약
+    stop_llm_main_if_running()
+
     return post
 
 async def run_session():
@@ -552,6 +685,75 @@ async def run_session():
         db.rollback()
     finally:
         db.close()
+
+async def create_initial_stances(db, post):
+    logger.info("[PHASE 1] Initial Stance Declaration (Sequential & Random)")
+
+    stances = []
+    initial_order = ["bot_1", "bot_2", "bot_3"]
+
+    for b_name in initial_order:
+        await smart_sleep()
+        try:
+            persona = await PersonaManager.get_persona(b_name)
+            bot_client = bots[b_name]
+
+            prompt = (
+                f"게시글 내용: {post.content}\n\n"
+                f"이 게시글에 대한 너의 첫 의견을 한국어로 짧게 남겨라.\n"
+                f"- 멘션은 하지 마라.\n"
+                f"- 내부 지침이나 메타 설명은 출력하지 마라.\n"
+                f"- 1~3문장 이내로 자연스럽게 작성해라."
+            )
+
+            reply_content = await bot_client.generate_completion(
+                persona,
+                prompt,
+                max_tokens=120
+            )
+
+            reply_content = sanitize_generated_reply(reply_content)
+
+            if not reply_content:
+                fallback_stances = [
+                    "나는 이 문제를 꽤 중요하게 본다.",
+                    "이건 생각보다 의견이 갈릴 만한 주제다.",
+                    "내 입장은 비교적 분명한 편이다.",
+                    "겉보기보다 논점이 복잡한 문제라고 본다.",
+                ]
+                reply_content = random.choice(fallback_stances)
+
+            stances.append((b_name, reply_content))
+
+        except Exception as e:
+            logger.warning(f"[PHASE 1 WARNING] Failed to generate initial stance for {b_name}: {e}")
+            stances.append((b_name, "이 주제는 입장이 갈릴 수밖에 없다고 본다."))
+
+    # DB 삽입 순서 랜덤화
+    random.shuffle(stances)
+
+    last_comment = None
+    last_speaker = None
+
+    for b_name, reply_content in stances:
+        c = Comment(
+            post_id=post.id,
+            parent_id=None,
+            bot_name=b_name,
+            content=reply_content
+        )
+        db.add(c)
+        db.commit()
+        db.refresh(c)
+
+        logger.info(f"[{b_name.upper()}] Initial Stance: {reply_content}")
+        last_comment = c
+        last_speaker = b_name
+
+    if not last_speaker:
+        last_speaker = random.choice(initial_order)
+
+    return stances, last_comment, last_speaker
 
 def build_turn_context(db, post, current_bot):
     bot_state = get_or_create_bot_state(db, current_bot)
@@ -737,6 +939,11 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker):
 
             await apply_spectator_anger(db, current_bot, reply_content)
 
+            # 1) 참가자 한 명이라도 metric >= 120 이면 세션 종료
+            if await close_session_if_any_metric_exceeded(db, session, threshold=120.0):
+                return
+
+            # 2) 기존 다중 participant 조건
             if await close_session_if_police_dispatch(db, session):
                 return
 
