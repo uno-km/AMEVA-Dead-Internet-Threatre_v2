@@ -163,13 +163,41 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
     base_info = f"[나의 감정 상태]\n나의 총합 유효 분노: {effective_anger:.1f}\n나의 타겟별 분노치: {target_str}\n"
     
     if effective_anger < 30:
-        directive = "너는 현재 차분한 상태다. 논리적으로 이야기하며 싸움을 말려라."
+        directive = "너는 현재 비교적 이성적이고 차분한 상태다. 예의를 지키되 냉정하게 논리적으로 토론해라."
     elif effective_anger < 70:
-        directive = "너는 꽤 화가 난 상태다. 너를 화나게 한 타겟 봇을 신랄하게 비판해라."
+        directive = "너는 꽤 화가 난 상태다. 너를 자극한 타겟 봇을 향해 논리적인 모순을 제기하며 날카롭게 쏘아붙여라."
     else:
-        directive = "너는 현재 극대노 상태다. 타겟 봇에게 원색적인 비난과 조롱을 쏟아부어라."
+        directive = (
+            "너는 현재 극도로 분노하여 흥분한 상태다. 절대로 감정을 감추지 말고, 타겟 봇에게 격정적인 비판과 반박을 쏟아부어라. "
+            "상대방의 태도나 주장을 거칠게 받아치되, 절대 대화를 포기하고 입을 다물거나 '화가 나서 할 말이 없다'라는 식으로 도망치지 마라."
+        )
         
     return base_info + directive
+
+async def generate_director_directive(current_bot: str, recent_history: str, eff_anger: float) -> str:
+    """God LLM generates a custom, dynamic directive for the current speaker based on conversation context."""
+    logger.info(f"[GOD LLM] Generating dynamic director's directive for {current_bot}...")
+    
+    prompt = (
+        f"[최근 대화]\n{recent_history}\n\n"
+        f"[명령 대상] {current_bot} (분노: {eff_anger:.0f})\n\n"
+        f"너는 갈등 기획자다. {current_bot}가 갈등을 증폭시키도록 구체적인 한 문장 지침을 내려라.\n"
+        f"예: 'bot_2의 날씨 발언을 위선이라고 꼬투리 잡아 물고 늘어져라.'\n"
+        f"한 문장의 한국어 지시사항만 출력해라."
+    )
+    
+    result = await god_llm.generate_completion(
+        "너는 갈등을 지시하는 감독관이다. 짧게 지시만 내려라.", 
+        prompt, 
+        max_tokens=80
+    )
+    
+    directive = result.strip() if result else "상대방의 논리적 모순을 찾아 공격해라."
+    # 너무 길면 첫 문장만 사용
+    if '\n' in directive:
+        directive = directive.split('\n')[0]
+    logger.info(f"[GOD LLM] Director's Directive for {current_bot}: {directive}")
+    return directive
 
 def extract_mention(text: str) -> str:
     """Extract @bot_1, @bot_2, @bot_3 from text."""
@@ -186,7 +214,7 @@ async def run_session():
         logger.info("==================================================")
         
         reset_bot_states(db)
-        await PersonaManager.reset_personas()
+        await PersonaManager.assign_random_personas()
         
         session = Session(status="ACTIVE")
         db.add(session)
@@ -201,28 +229,36 @@ async def run_session():
             max_tokens=300
         )
         if not post_content:
-            post_content = "오늘 날씨가 참 좋네요. 다들 어떻게 지내시나요?"
+            fallback_topics = [
+                "인공지능이 인간의 일자리를 대체하는 것이 과연 옳은 일인가?",
+                "요즘 젊은 세대가 예의가 없다는 말, 동의하시나요?",
+                "집값이 이렇게 비싼데 결혼을 꼭 해야 하나요?",
+                "학벌이 중요한가, 실력이 중요한가? 솔직하게 말해보자.",
+                "반려동물을 키우는 사람이 아이를 키우는 사람보다 이기적인가?",
+                "군대 의무 복무제, 폐지해야 하나 유지해야 하나?",
+                "유튜버나 스트리머가 진짜 직업이라고 할 수 있나?",
+                "편의점 알바 최저시급이 너무 적은가, 적절한가?",
+            ]
+            post_content = random.choice(fallback_topics)
         
         post = Post(session_id=session.id, title="새로운 논쟁 거리", content=post_content)
         db.add(post)
         db.commit()
         db.refresh(post)
         
-        # 2. Phase 1: All bots state their first stance concurrently
-        logger.info("[PHASE 1] Initial Stance Declaration (Parallel & Random)")
+        # 2. Phase 1: All bots state their first stance sequentially with CPU-aware throttling
+        logger.info("[PHASE 1] Initial Stance Declaration (Sequential & Random)")
         
-        async def fetch_stance(b_name):
+        stances = []
+        for b_name in ["bot_1", "bot_2", "bot_3"]:
+            await smart_sleep()
             persona = await PersonaManager.get_persona(b_name)
             bot_client = bots[b_name]
             prompt = f"게시글 내용: {post.content}\n\n이 게시글에 대한 너의 가장 솔직하고 확고한 첫 의견을 한국어로 남겨라. 멘션은 하지 마라."
             reply_content = await bot_client.generate_completion(persona, prompt, max_tokens=150)
             if not reply_content:
                 reply_content = "내 의견은 딱히 없다."
-            return (b_name, reply_content)
-
-        await smart_sleep()
-        tasks = [fetch_stance(b) for b in ["bot_1", "bot_2", "bot_3"]]
-        stances = await asyncio.gather(*tasks)
+            stances.append((b_name, reply_content))
         
         # Shuffle to randomize DB insertion order
         random.shuffle(stances)
@@ -261,17 +297,29 @@ async def run_session():
             recent_c = db.query(Comment).filter(Comment.post_id == post.id).order_by(Comment.id.desc()).limit(3).all()
             recent_history = "\n".join([f"{c.bot_name}: {c.content}" for c in reversed(recent_c)])
             
+            # God LLM을 통해 이번 턴의 스피커에게 내릴 실시간 연출 지시사항 생성
+            god_directive = await generate_director_directive(current_bot, recent_history, eff_anger)
+            
             prompt = (
                 f"게시글 내용: {post.content}\n\n"
                 f"최근 대화:\n{recent_history}\n\n"
                 f"{emotion_directive}\n"
+                f"[절대자(신)의 실시간 지시사항]\n{god_directive}\n\n"
+                f"너의 고유 캐릭터(페르소나)와 위의 감정 상태, 그리고 절대자의 실시간 지시사항을 완벽히 흡수하여 다음 덧글을 작성해라. "
+                f"절대 '화가 나서 말하지 않겠다'라며 대화를 회피하거나 기계적인 AI 답변을 하지 마라. "
                 f"반드시 한국어로 댓글을 달아라. 반드시 글 마지막에 발언을 넘길 봇을 '@bot_1', '@bot_2', '@bot_3' 중 하나로 멘션해서 지목해라."
             )
             
             reply_content = await bot_client.generate_completion(persona, prompt, max_tokens=150)
             
             if not reply_content:
-                reply_content = "화가 나서 할 말이 없다."
+                fallback_replies = [
+                    "아 진짜 어이가 없어서 말이 안 나온다. 잠깐만 기다려봐.",
+                    "하... 뭐라고 해야 할지 모르겠네. 일단 넘어가자.",
+                    "이 대화 수준이 너무 낮아서 뭐라 반응하기가 힘드네.",
+                    "ㅋㅋㅋ 할 말은 많은데 참고 있는 거다.",
+                ]
+                reply_content = random.choice(fallback_replies)
                 
             mentioned = extract_mention(reply_content)
             

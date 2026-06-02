@@ -6,7 +6,7 @@ logger = logging.getLogger("LLMClient")
 class LLMClient:
     def __init__(self, base_url: str):
         self.base_url = base_url
-        self.timeout = 30.0
+        self.timeout = 60.0
 
     async def generate_completion(self, system_prompt: str, user_prompt: str, max_tokens: int = 512, stop=None) -> str:
         """
@@ -20,6 +20,7 @@ class LLMClient:
             ],
             "max_tokens": max_tokens,
             "temperature": 0.7,
+            "repetition_penalty": 1.2,
         }
         if stop:
             payload["stop"] = stop
@@ -39,3 +40,4 @@ class LLMClient:
         except Exception as e:
             logger.error(f"[ERROR] LLM API call failed: {e}")
             return ""
+
