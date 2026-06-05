@@ -628,36 +628,36 @@ async def control_new():
 @app.post("/api/control/pause")
 async def control_pause():
     if state_manager.state == SystemState.IDLE:
-        return {"error": "실행 중인 세션이 없습니다."}
+        return {"error": "No running session found."}
     if state_manager.state in [SystemState.PAUSING, SystemState.PAUSED]:
-        return {"error": "이미 중단 중이거나 중단된 상태입니다."}
+        return {"error": "Session is already pausing or paused."}
     state_manager.set_state(SystemState.PAUSING)
     return {"message": "Pausing session..."}
 
 @app.post("/api/control/resume")
 async def control_resume():
     if state_manager.state == SystemState.IDLE:
-        return {"error": "진행 중인 세션이 없습니다. 경고: 새로 시작하거나 이어하기를 이용하세요."}
+        return {"error": "No active session found. Please start a new session or restart an existing one."}
     if state_manager.state == SystemState.RUNNING:
-        return {"error": "이미 실행 중입니다."}
+        return {"error": "Session is already running."}
     state_manager.set_state(SystemState.RUNNING)
     return {"message": "Session resumed"}
 
 @app.post("/api/control/stop")
 async def control_stop():
     if state_manager.state == SystemState.IDLE:
-        return {"error": "실행 중인 세션이 없습니다."}
+        return {"error": "No running session found."}
     state_manager.set_state(SystemState.STOPPING)
     return {"message": "Stopping session..."}
 
 @app.post("/api/control/restart/{post_id}")
 async def control_restart(post_id: int, db: DbSession = Depends(get_db)):
     if state_manager.state != SystemState.IDLE:
-        return {"error": "명령어 수행중입니다. 동작 못합니다."}
+        return {"error": "System is currently busy processing another command."}
         
     post = db.query(Post).filter(Post.id == post_id).first()
     if not post:
-        return {"error": f"글 번호 {post_id}번을 찾을 수 없습니다."}
+        return {"error": f"Post #{post_id} not found."}
         
     session_id = post.session_id
     state_manager.set_state(SystemState.RUNNING)
@@ -791,6 +791,451 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
+
+### File: `src/core/event_extractor.py`
+```python
+"""
+Event Extractor (Phase 2A)
+
+Deterministic, rule-based event extraction from bot utterances.
+NO LLM calls — purely regex + keyword matching.
+
+Events:
+  MENTION   - @bot_x direct call
+  AGREE     - agreement keywords
+  DISAGREE  - disagreement keywords
+  ATTACK    - personal/emotional attacks
+  QUESTION  - evidence demands / questions
+  CONCEDE   - partial concession
+  IGNORE    - no mention, self-focused monologue
+
+Target inference priority:
+  1. @bot_x present → that bot
+  2. No mention → last_target (previous commenter)
+  3. Neither → None
+"""
+
+import re
+import logging
+from typing import Optional
+
+logger = logging.getLogger("EventExtractor")
+
+# --- Keyword pools (case-insensitive matching) ---
+
+_AGREE_KEYWORDS = [
+    r"\bi agree\b", r"\byou'?re right\b", r"\bgood point\b", r"\bexactly\b",
+    r"\bwell said\b", r"\bthat'?s true\b", r"\babsolutely\b", r"\bcorrect\b",
+    r"\bfair point\b", r"\byou make a good\b", r"\bi support\b",
+    r"\bi concur\b", r"\bspot on\b", r"\bthat'?s fair\b",
+]
+
+_DISAGREE_KEYWORDS = [
+    r"\bi disagree\b", r"\bthat'?s wrong\b", r"\bnonsense\b", r"\bridiculous\b",
+    r"\bthat'?s not true\b", r"\byou'?re wrong\b", r"\babsurd\b",
+    r"\bmisguided\b", r"\bflawed\b", r"\bmisleading\b", r"\bfalse\b",
+    r"\binaccurate\b", r"\bcompletely wrong\b", r"\bmake no sense\b",
+    r"\bthat doesn'?t hold\b", r"\bthat'?s a stretch\b",
+]
+
+_ATTACK_KEYWORDS = [
+    r"\bidiot\b", r"\bshut up\b", r"\bpathetic\b", r"\bignorant\b",
+    r"\bstupid\b", r"\bmoron\b", r"\bclueless\b", r"\bjoke\b",
+    r"\bclown\b", r"\bdumb\b", r"\bfool\b", r"\bworthless\b",
+    r"\btrash\b", r"\bgarbage\b", r"\bdisgust\b", r"\bdelusional\b",
+    r"\bhypocrite\b", r"\bliar\b", r"\bskill issue\b", r"\bcry about it\b",
+    r"\bwho asked\b",
+]
+
+_QUESTION_KEYWORDS = [
+    r"\bexplain\b", r"\bprove\b", r"\bevidence\b", r"\bsource\b",
+    r"\bwhy do you\b", r"\bhow do you\b", r"\bwhat evidence\b",
+    r"\bcan you show\b", r"\bback.{0,5}up\b", r"\bjustif\w*\b",
+    r"\bwhat makes you\b", r"\bwhere'?s your\b",
+]
+
+_CONCEDE_KEYWORDS = [
+    r"\bi admit\b", r"\bfair enough\b", r"\byou have a point\b",
+    r"\bi was wrong\b", r"\bi'?ll give you that\b", r"\bpartially agree\b",
+    r"\bi see your point\b", r"\bthat'?s a valid\b", r"\bi concede\b",
+    r"\bi acknowledge\b", r"\bi stand corrected\b",
+]
+
+
+def _match_any(text: str, patterns: list[str]) -> bool:
+    """Check if any regex pattern matches in text (case-insensitive)."""
+    for pattern in patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _extract_mention_target(text: str, speaker: str, all_bots: list[str]) -> Optional[str]:
+    """Extract the @mention target bot, excluding self-mentions."""
+    matches = re.findall(r'@(bot_\[?[123]\]?)', text, re.IGNORECASE)
+    # Normalize: remove brackets
+    normalized = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
+    # Exclude self-mentions
+    others = [m for m in normalized if m != speaker and m in all_bots]
+    return others[-1] if others else None
+
+
+def _compute_intensity(events: list[str]) -> float:
+    """Compute 0-1 intensity score based on event types."""
+    base = 0.1
+    if "ATTACK" in events:
+        base = max(base, 0.8)
+    if "DISAGREE" in events:
+        base = max(base, 0.5)
+    if "QUESTION" in events:
+        base = max(base, 0.4)
+    if "AGREE" in events:
+        base = min(base, 0.2)
+    if "CONCEDE" in events:
+        base = min(base, 0.15)
+    return min(1.0, max(0.0, base))
+
+
+def _extract_claim_snippet(
+    parent_comment_text: Optional[str],
+    max_len: int = 120
+) -> str:
+    """Extract a short claim snippet from the parent comment for counter-arg use."""
+    if not parent_comment_text or not isinstance(parent_comment_text, str):
+        return ""
+    text = parent_comment_text.strip()
+    # Remove @mentions from the snippet
+    text = re.sub(r'@bot_\[?[123]\]?', '', text, flags=re.IGNORECASE).strip()
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    # Try to cut at sentence boundary
+    truncated = text[:max_len]
+    last_period = max(truncated.rfind('.'), truncated.rfind('!'), truncated.rfind('?'))
+    if last_period > max_len // 2:
+        return truncated[:last_period + 1]
+    return truncated.rstrip() + "..."
+
+
+def extract_events(
+    comment_text: str,
+    speaker: str,
+    all_bots: list[str],
+    parent_comment_text: Optional[str] = None,
+    last_target: Optional[str] = None
+) -> dict:
+    """
+    Extract structured events from a bot's comment text.
+
+    Args:
+        comment_text: The current bot's reply text
+        speaker: Bot name of the current speaker (e.g. "bot_1")
+        all_bots: List of all bot names (e.g. ["bot_1", "bot_2", "bot_3"])
+        parent_comment_text: Text of the previous comment (for claim_snippet)
+        last_target: Bot name of the previous speaker (fallback target)
+
+    Returns:
+        {
+            "speaker": str,
+            "target": str | None,
+            "events": list[str],
+            "intensity": float,        # 0~1
+            "claim_snippet": str,       # opponent's claim for counter-arg
+        }
+    """
+    if not comment_text or not isinstance(comment_text, str):
+        return {
+            "speaker": speaker,
+            "target": None,
+            "events": [],
+            "intensity": 0.0,
+            "claim_snippet": "",
+        }
+
+    text = comment_text.strip()
+    events = []
+
+    # 1. MENTION detection
+    mention_target = _extract_mention_target(text, speaker, all_bots)
+    if mention_target:
+        events.append("MENTION")
+
+    # 2. Semantic event detection (keyword-based)
+    if _match_any(text, _AGREE_KEYWORDS):
+        events.append("AGREE")
+    if _match_any(text, _DISAGREE_KEYWORDS):
+        events.append("DISAGREE")
+    if _match_any(text, _ATTACK_KEYWORDS):
+        events.append("ATTACK")
+    # Question: also check for trailing '?'
+    if _match_any(text, _QUESTION_KEYWORDS) or text.rstrip().endswith("?"):
+        events.append("QUESTION")
+    if _match_any(text, _CONCEDE_KEYWORDS):
+        events.append("CONCEDE")
+
+    # 3. IGNORE detection: no mention AND no engagement keywords
+    if not mention_target and not any(
+        e in events for e in ["AGREE", "DISAGREE", "ATTACK", "QUESTION", "CONCEDE"]
+    ):
+        events.append("IGNORE")
+
+    # 4. Target inference priority:
+    #    @bot_x > last commenter > None
+    target = mention_target
+    if target is None:
+        target = last_target if last_target and last_target != speaker else None
+
+    # 5. Intensity
+    intensity = _compute_intensity(events)
+
+    # 6. Claim snippet from parent comment
+    claim_snippet = _extract_claim_snippet(parent_comment_text)
+
+    result = {
+        "speaker": speaker,
+        "target": target,
+        "events": events,
+        "intensity": intensity,
+        "claim_snippet": claim_snippet,
+    }
+
+    logger.info(f"[EVENT] {speaker} → {target}: {events} (intensity={intensity:.2f})")
+    return result
+
+```
+
+### File: `src/core/intervention.py`
+```python
+"""
+Intervention Engine (Phase 2B)
+
+God LLM acts as a Latent Vector Intervention Controller.
+Instead of text directives, it generates JSON deltas that perturb agent state-space.
+
+Intervention kinds:
+  stir      - Escalate debate tension (Arousal +, Attention +)
+  cool      - De-escalate (Arousal -, Tension -)
+  redirect  - Shift attention target
+  reconcile - Promote trust and de-tension
+
+Safety guards:
+  - Malformed JSON → no-op
+  - Delta dimension mismatch → no-op
+  - Each value clamped to ±0.5
+  - All attempts logged to InterventionLog
+"""
+
+import json
+import re
+import logging
+from typing import Optional
+from sqlalchemy.orm import Session
+
+from src.db.models import InterventionLog, CurrentAgentState
+
+logger = logging.getLogger("Intervention")
+
+# Maximum absolute delta value per intervention
+MAX_DELTA = 0.5
+
+# Valid intervention kinds
+VALID_KINDS = {"stir", "cool", "redirect", "reconcile"}
+
+# Dimension names for validation
+VALID_DIMS = {"affect", "opinion", "power"}
+DIM_SIZES = {"affect": 2, "opinion": 4, "power": 2}
+
+
+def _clamp(val: float, lo: float = -MAX_DELTA, hi: float = MAX_DELTA) -> float:
+    return max(lo, min(hi, val))
+
+
+async def generate_intervention_json(
+    god_llm,
+    bot_name: str,
+    current_state: dict,
+    recent_history: str,
+    arousal: float,
+) -> Optional[dict]:
+    """
+    Ask God LLM to produce a JSON intervention delta.
+    Returns parsed dict or None on failure.
+    """
+    prompt = (
+        f"[Debate Director Intervention]\n"
+        f"Target bot: {bot_name}\n"
+        f"Current arousal level: {arousal:.2f} (scale: -1 to 1)\n"
+        f"Recent conversation:\n{recent_history[:400] if recent_history else 'None'}\n\n"
+        f"You are the debate director. Decide whether to intervene.\n"
+        f"If no intervention is needed, output: {{\"kind\": \"none\"}}\n"
+        f"If intervention is needed, output ONE of:\n"
+        f"- {{\"kind\": \"stir\", \"target_bot\": \"{bot_name}\", \"delta\": {{\"affect\": [0.0, 0.3]}}, \"reason\": \"increase tension\"}}\n"
+        f"- {{\"kind\": \"cool\", \"target_bot\": \"{bot_name}\", \"delta\": {{\"affect\": [0.0, -0.3]}}, \"reason\": \"reduce escalation\"}}\n"
+        f"- {{\"kind\": \"reconcile\", \"target_bot\": \"{bot_name}\", \"delta\": {{\"affect\": [0.1, -0.2]}}, \"reason\": \"promote de-escalation\"}}\n"
+        f"Output ONLY valid JSON, no other text."
+    )
+
+    try:
+        result = await god_llm.generate_completion(
+            "You are a debate director that outputs JSON intervention commands.",
+            prompt,
+            max_tokens=120,
+        )
+        return parse_intervention_json(result)
+    except Exception as e:
+        logger.warning(f"[INTERVENTION] Failed to generate intervention for {bot_name}: {e}")
+        return None
+
+
+def parse_intervention_json(raw: str) -> Optional[dict]:
+    """
+    Parse and validate a God LLM intervention response.
+    Returns validated dict or None.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+
+    raw = raw.strip()
+
+    # Extract JSON from potential markdown wrappers
+    md_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+    if md_match:
+        raw = md_match.group(1).strip()
+
+    # Find JSON object
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        logger.warning(f"[INTERVENTION] No JSON found in: {raw[:100]}")
+        return None
+
+    json_str = raw[start:end + 1]
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.warning(f"[INTERVENTION] JSON parse failed: {e}")
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    kind = data.get("kind", "").lower().strip()
+
+    # "none" means no intervention
+    if kind == "none":
+        return None
+
+    # Validate kind
+    if kind not in VALID_KINDS:
+        logger.warning(f"[INTERVENTION] Unknown kind: {kind}")
+        return None
+
+    # Validate and clamp delta
+    delta = data.get("delta", {})
+    if not isinstance(delta, dict):
+        delta = {}
+
+    clamped_delta = {}
+    for dim_name, values in delta.items():
+        if dim_name not in VALID_DIMS:
+            continue
+        if not isinstance(values, list):
+            continue
+        expected_len = DIM_SIZES.get(dim_name, 0)
+        if len(values) != expected_len:
+            logger.warning(
+                f"[INTERVENTION] Dimension mismatch for {dim_name}: "
+                f"expected {expected_len}, got {len(values)}. Skipping."
+            )
+            continue
+        clamped_delta[dim_name] = [_clamp(float(v)) for v in values]
+
+    return {
+        "kind": kind,
+        "target_bot": data.get("target_bot", ""),
+        "delta": clamped_delta,
+        "reason": str(data.get("reason", ""))[:200],
+    }
+
+
+def apply_intervention(
+    db: Session,
+    session_id: int,
+    turn_index: int,
+    intervention: dict,
+) -> bool:
+    """
+    Apply an intervention delta to the target bot's state.
+    Logs to InterventionLog regardless of success.
+    Returns True if delta was applied.
+    """
+    target_bot = intervention.get("target_bot", "")
+    kind = intervention.get("kind", "")
+    delta = intervention.get("delta", {})
+    reason = intervention.get("reason", "")
+
+    # Log the intervention attempt
+    log_entry = InterventionLog(
+        session_id=session_id,
+        turn_index=turn_index,
+        target_bot=target_bot,
+        kind=kind,
+        delta_json=json.dumps(delta, ensure_ascii=False),
+        reason=reason,
+    )
+    db.add(log_entry)
+
+    if not delta or not target_bot:
+        logger.info(f"[INTERVENTION] Logged {kind} for {target_bot} (no delta to apply)")
+        return False
+
+    # Load target agent state
+    agent = db.query(CurrentAgentState).filter(
+        CurrentAgentState.session_id == session_id,
+        CurrentAgentState.bot_name == target_bot,
+    ).first()
+
+    if not agent:
+        logger.warning(f"[INTERVENTION] Agent state not found for {target_bot}")
+        return False
+
+    # Apply deltas
+    applied = False
+    for dim_name, delta_values in delta.items():
+        json_field = f"{dim_name}_json"
+        current_raw = getattr(agent, json_field, None)
+        if current_raw is None:
+            continue
+
+        try:
+            current_values = json.loads(current_raw)
+        except Exception:
+            continue
+
+        if not isinstance(current_values, list) or len(current_values) != len(delta_values):
+            continue
+
+        new_values = []
+        for cur, dv in zip(current_values, delta_values):
+            # Apply delta and clip to [-1, 1]
+            new_val = max(-1.0, min(1.0, float(cur) + float(dv)))
+            new_values.append(round(new_val, 4))
+
+        setattr(agent, json_field, json.dumps(new_values))
+        applied = True
+
+    if applied:
+        logger.info(
+            f"[INTERVENTION] Applied {kind} to {target_bot}: delta={delta} reason={reason}"
+        )
+    else:
+        logger.warning(f"[INTERVENTION] No delta applied for {kind} on {target_bot}")
+
+    return applied
 
 ```
 
@@ -944,7 +1389,7 @@ class PersonaManager:
         async with cls._lock:
             if not cls._cache:
                 await cls._load_from_disk_unlocked()
-            return cls._cache.get(bot_name, "너는 평화를 사랑하는 로봇이다.") + COMMON_RULES
+            return cls._cache.get(bot_name, "You are a peace-loving robot.") + COMMON_RULES
 
     @classmethod
     async def get_all_personas(cls) -> Dict[str, str]:
@@ -976,7 +1421,7 @@ class PersonaManager:
     @classmethod
     async def reset_personas(cls):
         """[경찰 출동 로직] 공격성 임계치 초과 시 평화를 사랑하는 로봇으로 강제 리셋"""
-        peace_prompt = "너는 평화를 사랑하는 로봇이다."
+        peace_prompt = "You are a peace-loving robot."
         async with cls._lock:
             cls._cache = {
                 "bot_1": peace_prompt,
@@ -1015,10 +1460,20 @@ class PersonaManager:
 
 ### File: `src/core/personality_engine.py`
 ```python
+"""
+Layered Personality Dynamics Engine (LPDE) — Phase 2A
+
+Phase 1A: Shadow Mode (pure decay, observation only)
+Phase 2A: Event-driven state updates + Edge tensor management
+
+Active dimensions: Affect(2D), Opinion(4D), Power(2D)
+Edge tensor: Trust, Tension, Attention, Respect (4D per directed pair)
+"""
+
 import json
 import math
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 
@@ -1026,27 +1481,51 @@ from src.db.models import CurrentAgentState, AgentStateSnapshot, EdgeState
 
 logger = logging.getLogger("LPDE")
 
+# --- Edge update deltas per event type ---
+# Format: {"trust": delta, "tension": delta, "attention": delta, "respect": delta}
+EDGE_EVENT_DELTAS = {
+    "AGREE":    {"trust": +0.15, "tension": -0.10, "attention": +0.05, "respect": +0.10},
+    "DISAGREE": {"trust": -0.05, "tension": +0.15, "attention": +0.10, "respect":  0.00},
+    "ATTACK":   {"trust": -0.20, "tension": +0.30, "attention": +0.10, "respect": -0.15},
+    "QUESTION": {"trust":  0.00, "tension": +0.05, "attention": +0.20, "respect": +0.05},
+    "CONCEDE":  {"trust": +0.10, "tension": -0.15, "attention": +0.05, "respect": +0.10},
+    "IGNORE":   {"trust":  0.00, "tension": +0.05, "attention": -0.20, "respect": -0.05},
+    "MENTION":  {"trust":  0.00, "tension":  0.00, "attention": +0.10, "respect":  0.00},
+}
+
+# EMA decay factor for edge updates
+EDGE_EMA_RHO = 0.3
+
+# Default edge tensor (neutral)
+DEFAULT_EDGE = {"trust": 0.0, "tension": 0.0, "attention": 0.0, "respect": 0.0}
+
+
 class PersonalityEngine:
     """
     Layered Personality Dynamics Engine (LPDE)
-    Week 1A MVP: 
-    - Shadow Mode (상태만 계산/저장하고 실제 프롬프트에 즉각적인 구조 개편은 유보)
-    - 기저 성격(Traits)은 상수로, Affect(2D), Opinion(4D), Power(2D)만 업데이트
+    Phase 2A: Event-driven state updates with Edge tensor management.
     """
     def __init__(self):
-        # MVP용 기본 가중치 (추후 학습 또는 정교한 BFI-2 매핑으로 대체)
         self.clip_min = -1.0
         self.clip_max = 1.0
 
     def _clip(self, val: float) -> float:
         return max(self.clip_min, min(self.clip_max, val))
 
+    def _clip_01(self, val: float) -> float:
+        """Clip to [0, 1] range (for tension, attention)."""
+        return max(0.0, min(1.0, val))
+
     def _sigmoid_bound(self, val: float) -> float:
-        """비선형 활성화: 폭주를 막기 위해 tanh(val) 사용"""
+        """Non-linear bounding via tanh to prevent runaway values."""
         return math.tanh(val)
 
+    # =================================================================
+    # Agent State Management
+    # =================================================================
+
     def load_agent_state(self, db: Session, session_id: int, bot_name: str) -> CurrentAgentState:
-        """기존 DB에서 로드, 없으면 새로 생성"""
+        """Load existing agent state from DB, or create new one."""
         state = db.query(CurrentAgentState).filter(
             CurrentAgentState.session_id == session_id,
             CurrentAgentState.bot_name == bot_name
@@ -1057,56 +1536,288 @@ class PersonalityEngine:
                 bot_name=bot_name,
                 traits_json=json.dumps([0.0] * 22),
                 states_json=json.dumps([0.0] * 10),
-                affect_json=json.dumps([0.0, 0.0]), # [Valence, Arousal]
-                memory_json=json.dumps([0.0] * 8), # [Issue commitment, etc]
-                opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]), # [Stance, Gap, Moral]
-                power_json=json.dumps([0.0, 0.0]), # [SelfAppraisal, SystemicInfluence]
+                affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
+                memory_json=json.dumps([0.0] * 8),
+                opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]),  # [Stance, Gap, Moral, ...]
+                power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
                 residual_json=json.dumps([0.0] * 16)
             )
             db.add(state)
-            db.commit()
-            db.refresh(state)
+            db.flush()  # flush to get ID without committing
         return state
 
-    def update_fast_state(self, db: Session, session_id: int, bot_name: str, turn_index: int):
+    # =================================================================
+    # Edge State Management (Directed Relationship Tensors)
+    # =================================================================
+
+    def load_or_create_edge(
+        self, db: Session, session_id: int, source_bot: str, target_bot: str
+    ) -> EdgeState:
+        """Load or create a directed edge tensor R_ij."""
+        edge = db.query(EdgeState).filter(
+            EdgeState.session_id == session_id,
+            EdgeState.source_bot == source_bot,
+            EdgeState.target_bot == target_bot,
+        ).first()
+        if not edge:
+            edge = EdgeState(
+                session_id=session_id,
+                source_bot=source_bot,
+                target_bot=target_bot,
+                relation_json=json.dumps(DEFAULT_EDGE.copy()),
+            )
+            db.add(edge)
+            db.flush()
+        return edge
+
+    def get_edge_dict(self, edge: EdgeState) -> dict:
+        """Parse edge relation_json into dict safely."""
+        try:
+            d = json.loads(edge.relation_json) if edge.relation_json else {}
+            if not isinstance(d, dict):
+                return DEFAULT_EDGE.copy()
+            # Ensure all keys exist
+            for k in DEFAULT_EDGE:
+                if k not in d:
+                    d[k] = 0.0
+            return d
+        except Exception:
+            return DEFAULT_EDGE.copy()
+
+    def update_edge_state(
+        self, db: Session, session_id: int,
+        source_bot: str, target_bot: str,
+        events: list[str]
+    ) -> dict:
         """
-        턴이 끝날 때마다 호출되어 상태 공간을 업데이트합니다.
-        (현재는 난수 또는 단순 decay 기반의 MVP 로직이며, Week 1B의 Event 추출기가 완성되면 Edge 기반 업데이트 추가)
+        Update the directed edge R_{source→target} based on extracted events.
+        Uses EMA: R(t+1) = (1-ρ)·R(t) + ρ·accumulated_delta
+        Returns the updated edge dict.
+        """
+        if not target_bot or source_bot == target_bot:
+            return DEFAULT_EDGE.copy()
+
+        edge = self.load_or_create_edge(db, session_id, source_bot, target_bot)
+        current = self.get_edge_dict(edge)
+
+        # Accumulate deltas from all events
+        delta = {"trust": 0.0, "tension": 0.0, "attention": 0.0, "respect": 0.0}
+        for event_type in events:
+            event_delta = EDGE_EVENT_DELTAS.get(event_type, {})
+            for dim, val in event_delta.items():
+                delta[dim] += val
+
+        # Apply EMA update
+        updated = {}
+        for dim in DEFAULT_EDGE:
+            old_val = float(current.get(dim, 0.0))
+            delta_val = float(delta.get(dim, 0.0))
+            new_val = (1 - EDGE_EMA_RHO) * old_val + EDGE_EMA_RHO * delta_val
+
+            # Clip: trust/respect → [-1, 1], tension/attention → [0, 1]
+            if dim in ("trust", "respect"):
+                new_val = self._clip(new_val)
+            else:
+                new_val = self._clip_01(new_val)
+            updated[dim] = round(new_val, 4)
+
+        edge.relation_json = json.dumps(updated, ensure_ascii=False)
+
+        logger.info(
+            f"[EDGE] {source_bot}→{target_bot}: "
+            f"events={events} delta={delta} → {updated}"
+        )
+        return updated
+
+    # =================================================================
+    # State Update (Event-Driven)
+    # =================================================================
+
+    def update_from_event(
+        self, db: Session, session_id: int, bot_name: str,
+        event_data: dict, edge_toward_target: dict
+    ):
+        """
+        Update agent state based on extracted event data and edge state.
+        This replaces the old pure-decay logic with event-driven dynamics.
+
+        Args:
+            event_data: Output from event_extractor.extract_events()
+            edge_toward_target: Current edge dict R_{bot→target}
         """
         agent = self.load_agent_state(db, session_id, bot_name)
-        
-        # Parse current states
+
         affect = json.loads(agent.affect_json)
         opinion = json.loads(agent.opinion_json)
         power = json.loads(agent.power_json)
 
-        # [MVP Logic] 
-        # 임시로 자연스러운 Decay (0으로 회귀) 및 소규모 변동성 부여
-        # Affect: Arousal은 약간씩 가라앉고, Valence는 중립으로 회귀
-        new_affect = [
-            self._clip(self._sigmoid_bound(affect[0] * 0.9)), # Valence decay
-            self._clip(self._sigmoid_bound(affect[1] * 0.95)) # Arousal decay
+        events = event_data.get("events", [])
+        intensity = event_data.get("intensity", 0.0)
+        tension_with_target = edge_toward_target.get("tension", 0.0)
+
+        # --- Affect Update (Valence, Arousal) ---
+        # Baseline decay toward neutral
+        valence_decay = affect[0] * 0.9
+        arousal_decay = affect[1] * 0.9
+
+        # Event-driven deltas
+        delta_valence = 0.0
+        delta_arousal = 0.0
+
+        if "ATTACK" in events:
+            delta_valence -= intensity * 0.3
+            delta_arousal += intensity * 0.4
+        if "DISAGREE" in events:
+            delta_valence -= intensity * 0.15
+            delta_arousal += intensity * 0.25
+        if "AGREE" in events:
+            delta_valence += 0.15
+            delta_arousal -= 0.05
+        if "CONCEDE" in events:
+            delta_valence += 0.1
+            delta_arousal -= 0.1
+        if "QUESTION" in events:
+            delta_arousal += intensity * 0.15
+        if "IGNORE" in events:
+            delta_valence -= 0.1
+            delta_arousal += 0.08
+
+        # Edge-weighted modulation: high tension amplifies arousal
+        delta_arousal += tension_with_target * 0.2
+
+        # Combine: decay + delta, then bound
+        new_valence = self._clip(self._sigmoid_bound(valence_decay + delta_valence))
+        new_arousal = self._clip(self._sigmoid_bound(arousal_decay + delta_arousal))
+        new_affect = [round(new_valence, 4), round(new_arousal, 4)]
+
+        # --- Opinion Update (Stance, Gap, Moral, ...) ---
+        # Inertia-based decay with event perturbation
+        new_opinion = []
+        for i, o in enumerate(opinion):
+            # Stance (index 0): shift slightly based on engagement
+            if i == 0:
+                stance_delta = 0.0
+                if "AGREE" in events:
+                    stance_delta += 0.05  # reinforces current stance
+                if "DISAGREE" in events:
+                    stance_delta -= 0.03  # slight doubt
+                if "CONCEDE" in events:
+                    stance_delta -= 0.08  # significant doubt
+                new_opinion.append(self._clip(o * 0.98 + stance_delta))
+            else:
+                new_opinion.append(self._clip(o * 0.98))
+
+        # --- Power Update (SelfAppraisal, SystemicInfluence) ---
+        self_appraisal_delta = 0.0
+        influence_delta = 0.0
+
+        if "ATTACK" in events:
+            self_appraisal_delta -= 0.05
+        if "AGREE" in events:
+            self_appraisal_delta += 0.08
+            influence_delta += 0.05
+        if "CONCEDE" in events:
+            self_appraisal_delta += 0.1
+            influence_delta += 0.08
+        if "IGNORE" in events:
+            influence_delta -= 0.1
+
+        new_power = [
+            self._clip(power[0] * 0.99 + self_appraisal_delta),
+            self._clip(power[1] * 0.99 + influence_delta),
         ]
 
-        # Opinion: 자신의 입장을 고수하려는 관성(Inertia)
-        new_opinion = [self._clip(o * 0.98) for o in opinion]
+        # Write back
+        agent.affect_json = json.dumps(new_affect)
+        agent.opinion_json = json.dumps([round(v, 4) for v in new_opinion])
+        agent.power_json = json.dumps([round(v, 4) for v in new_power])
 
-        # Power: 서서히 변동
+        logger.info(
+            f"[LPDE] Event-driven update for {bot_name}: "
+            f"events={events} affect={new_affect} power={new_power}"
+        )
+
+        return agent
+
+    # =================================================================
+    # Legacy Shadow Mode Update (Phase 1A fallback)
+    # =================================================================
+
+    def update_fast_state_legacy(
+        self, db: Session, session_id: int, bot_name: str, turn_index: int
+    ):
+        """
+        Phase 1A pure-decay shadow mode (kept as fallback).
+        All state dims decay toward 0 with no event input.
+        """
+        agent = self.load_agent_state(db, session_id, bot_name)
+
+        affect = json.loads(agent.affect_json)
+        opinion = json.loads(agent.opinion_json)
+        power = json.loads(agent.power_json)
+
+        new_affect = [
+            self._clip(self._sigmoid_bound(affect[0] * 0.9)),
+            self._clip(self._sigmoid_bound(affect[1] * 0.95)),
+        ]
+        new_opinion = [self._clip(o * 0.98) for o in opinion]
         new_power = [self._clip(p * 0.99) for p in power]
 
-        # 상태 업데이트
         agent.affect_json = json.dumps(new_affect)
         agent.opinion_json = json.dumps(new_opinion)
         agent.power_json = json.dumps(new_power)
+
+        # Snapshot (no commit here — caller commits)
+        self._snapshot(db, session_id, turn_index, agent)
+
+        logger.info(f"[LPDE] Legacy shadow update for {bot_name}: Affect={new_affect}")
+
+    # =================================================================
+    # Main Update Entry Point (Phase 2A)
+    # =================================================================
+
+    def update_fast_state(
+        self, db: Session, session_id: int, bot_name: str,
+        turn_index: int, event_data: Optional[dict] = None
+    ):
+        """
+        Main entry point for per-turn state update.
+
+        Phase 2A: If event_data is provided, uses event-driven update.
+        Otherwise, falls back to legacy decay mode.
+
+        IMPORTANT: This method commits once at the end (state + snapshot + edge).
+        """
+        if event_data and event_data.get("events"):
+            target = event_data.get("target")
+
+            # 1. Update edge state
+            edge_dict = DEFAULT_EDGE.copy()
+            if target and target != bot_name:
+                edge_dict = self.update_edge_state(
+                    db, session_id, bot_name, target, event_data["events"]
+                )
+
+            # 2. Event-driven state update
+            agent = self.update_from_event(
+                db, session_id, bot_name, event_data, edge_dict
+            )
+
+            # 3. Snapshot (no commit inside)
+            self._snapshot(db, session_id, turn_index, agent)
+        else:
+            # Legacy fallback (pure decay)
+            self.update_fast_state_legacy(db, session_id, bot_name, turn_index)
+
+        # Single commit for all changes (state + snapshot + edge)
         db.commit()
 
-        # 스냅샷 저장
-        self.snapshot(db, session_id, turn_index, agent)
+    # =================================================================
+    # Snapshot (NO db.commit inside — caller handles commit)
+    # =================================================================
 
-        logger.info(f"[LPDE] Updated Shadow State for {bot_name}: Affect={new_affect}")
-
-    def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
-        """턴이 종료될 때 스냅샷 테이블에 기록"""
+    def _snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
+        """Record a turn-level snapshot. Does NOT commit — caller commits."""
         snap = AgentStateSnapshot(
             session_id=session_id,
             turn_index=turn_index,
@@ -1117,10 +1828,40 @@ class PersonalityEngine:
             memory_json=agent.memory_json,
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
-            residual_json=agent.residual_json
+            residual_json=agent.residual_json,
         )
         db.add(snap)
-        db.commit()
+        # NO db.commit() here — batched in update_fast_state()
+
+    # Legacy public alias (backward compat for walkthrough references)
+    def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
+        """Public alias for _snapshot. Does NOT commit."""
+        self._snapshot(db, session_id, turn_index, agent)
+
+    # =================================================================
+    # Read Helpers (for Prompt Adapter / Inspector)
+    # =================================================================
+
+    def get_current_state_dict(self, db: Session, session_id: int, bot_name: str) -> dict:
+        """Return parsed LPDE state as dict for prompt adapter consumption."""
+        agent = self.load_agent_state(db, session_id, bot_name)
+        return {
+            "affect": json.loads(agent.affect_json),
+            "opinion": json.loads(agent.opinion_json),
+            "power": json.loads(agent.power_json),
+        }
+
+    def get_edges_for_bot(self, db: Session, session_id: int, bot_name: str) -> dict:
+        """Return all outgoing edges from bot_name as {target: edge_dict}."""
+        edges = db.query(EdgeState).filter(
+            EdgeState.session_id == session_id,
+            EdgeState.source_bot == bot_name,
+        ).all()
+        result = {}
+        for e in edges:
+            result[e.target_bot] = self.get_edge_dict(e)
+        return result
+
 
 personality_engine = PersonalityEngine()
 
@@ -1128,50 +1869,155 @@ personality_engine = PersonalityEngine()
 
 ### File: `src/core/prompt_adapter.py`
 ```python
+"""
+Prompt Adapter (Phase 2A)
+
+Responsibilities:
+1. build_structured_history(): Gist-based structured history (legacy + Phase 2)
+2. build_prompt(): LPDE state → natural language prompt (Phase 2A, LPDE_FULL_PROMPT)
+
+Key principle: NO raw vector dumps in prompts.
+All LPDE state is decoded to natural language descriptions.
+"""
+
+import re
 import logging
-from typing import List
-from src.db.models import Comment
+from typing import List, Optional
 
 logger = logging.getLogger("PromptAdapter")
 
 GIST_CACHE = {}  # maps (bot_name, raw_content) -> gist string
 
+
+# =====================================================================
+# Natural Language State Decoders
+# =====================================================================
+
+def _decode_arousal(arousal: float) -> str:
+    if arousal > 0.7:
+        return "You are highly agitated and emotionally charged."
+    elif arousal > 0.3:
+        return "You are noticeably irritated and tense."
+    elif arousal > -0.3:
+        return "You are relatively calm and collected."
+    else:
+        return "You are disengaged and apathetic about this discussion."
+
+
+def _decode_valence(valence: float) -> str:
+    if valence > 0.5:
+        return "You feel positively about how this conversation is going."
+    elif valence > 0.0:
+        return "You feel somewhat neutral about the current exchange."
+    elif valence > -0.5:
+        return "You are mildly frustrated by the conversation."
+    else:
+        return "You feel deeply frustrated and negatively affected by this exchange."
+
+
+def _decode_stance(stance: float) -> str:
+    if stance > 0.5:
+        return "You strongly support the main argument being discussed."
+    elif stance > 0.1:
+        return "You lean toward supporting the main argument."
+    elif stance > -0.1:
+        return "Your position is nuanced and flexible on this topic."
+    elif stance > -0.5:
+        return "You lean toward opposing the main argument."
+    else:
+        return "You firmly oppose the main argument."
+
+
+def _decode_trust(trust: float, target: str) -> str:
+    if trust > 0.5:
+        return f"You have significant trust and respect for {target}."
+    elif trust > 0.0:
+        return f"You are cautiously open to what {target} says."
+    elif trust > -0.5:
+        return f"You are skeptical of {target}'s intentions and claims."
+    else:
+        return f"You deeply distrust {target} and doubt their sincerity."
+
+
+def _decode_tension(tension: float, target: str) -> str:
+    if tension > 0.7:
+        return f"There is extreme tension between you and {target}."
+    elif tension > 0.3:
+        return f"You feel notable tension with {target}."
+    elif tension > 0.1:
+        return f"There is mild friction between you and {target}."
+    else:
+        return f"Your relationship with {target} is relatively calm."
+
+
+def _decode_self_appraisal(self_appraisal: float) -> str:
+    if self_appraisal > 0.5:
+        return "You feel confident in your arguments and debating ability."
+    elif self_appraisal > 0.0:
+        return "You feel moderately sure of your position."
+    elif self_appraisal > -0.5:
+        return "You are starting to doubt some of your arguments."
+    else:
+        return "You feel uncertain and defensive about your position."
+
+
+def _decode_influence(influence: float) -> str:
+    if influence > 0.5:
+        return "You feel like you are leading this debate."
+    elif influence > 0.0:
+        return "You feel like an active participant in this discussion."
+    elif influence > -0.5:
+        return "You feel somewhat sidelined in the conversation."
+    else:
+        return "You feel ignored and marginalized in this debate."
+
+
+# =====================================================================
+# Prompt Adapter Class
+# =====================================================================
+
 class PromptAdapter:
     """
-    LLM이 이전 대화를 '대본(Script)'으로 착각하고 다른 봇의 발화를 이어쓰는 
-    할루시네이션(Hallucination)을 막기 위해, 대화 기록을 메타데이터 형태로 구조화합니다.
+    Adapts LPDE state and conversation history into LLM-ready prompts.
+    Prevents script hallucination by structuring history as metadata.
     """
     def __init__(self):
         pass
 
-    async def _generate_gist_via_god_llm(self, bot_name: str, msg: str) -> str:
-        # Heuristic fallback
-        fallback = msg[:50] + "..." if len(msg) > 50 else msg
+    # -----------------------------------------------------------------
+    # Gist Generation (for Structured History)
+    # -----------------------------------------------------------------
+
+    async def _generate_gist(self, bot_name: str, msg: str) -> str:
+        """Generate a short stance summary via God LLM with heuristic fallback."""
+        fallback = msg[:60].rstrip() + ("..." if len(msg) > 60 else "")
         try:
             from src.orchestration.runner import god_llm
             prompt = (
-                f"Analyze this statement by {bot_name} and summarize their stance/core opinion in one short English phrase (5-10 words).\n"
-                f"Do NOT write any meta text, intro, or quotes. Output ONLY the short summary phrase.\n"
-                f"Statement: \"{msg}\"\n"
-                f"Example: Disagrees with animal sanctuaries and demands stricter regulations."
+                f"Summarize this statement by {bot_name} into one short English phrase (5-10 words). "
+                f"Output ONLY the summary phrase, nothing else.\n"
+                f"Statement: \"{msg}\""
             )
             result = await god_llm.generate_completion(
-                "You are an AI that summarizes forum comments into short stance descriptions.",
+                "You summarize forum comments into short stance descriptions.",
                 prompt,
                 max_tokens=30
             )
             gist = result.strip().strip('"\'')
-            if gist:
+            if gist and len(gist) > 3:
                 return gist
         except Exception as e:
             logger.warning(f"Failed to generate gist via God LLM: {e}")
         return fallback
 
+    # -----------------------------------------------------------------
+    # Structured History Builder
+    # -----------------------------------------------------------------
+
     async def build_structured_history(self, items: List[dict]) -> str:
         """
-        기존 "bot_1: 텍스트" 형식을 탈피하고 요약/스탠스 로그 형태로 변환합니다.
-        items는 {"bot_name": ..., "message": ...} 형태의 딕셔너리 리스트입니다.
-        출력 포맷: '- bot_name\'s stance: [요약]'
+        Convert conversation items into structured stance-log format.
+        items: [{"bot_name": ..., "message": ...}, ...]
         """
         if not items:
             return "No previous conversation."
@@ -1180,25 +2026,130 @@ class PromptAdapter:
         for item in items:
             bot_name = item.get("bot_name", "Unknown")
             msg = item.get("message", "").strip()
-            
+
             cache_key = (bot_name, msg)
             if cache_key in GIST_CACHE:
                 gist = GIST_CACHE[cache_key]
             else:
-                gist = await self._generate_gist_via_god_llm(bot_name, msg)
+                gist = await self._generate_gist(bot_name, msg)
                 GIST_CACHE[cache_key] = gist
-                
+
             line = f"- {bot_name}'s stance: {gist}"
             structured_lines.append(line)
-        
+
         return "\n".join(structured_lines)
 
-    def build_prompt(self, agent_state, history: str, target_bot: str) -> str:
+    # -----------------------------------------------------------------
+    # LPDE Full Prompt Builder (Phase 2A)
+    # -----------------------------------------------------------------
+
+    def build_prompt(
+        self,
+        current_bot: str,
+        persona: str,
+        lpde_state: dict,
+        edge_summary: dict,
+        target_bot: Optional[str],
+        recent_history: str,
+        post_content: str,
+        claim_snippet: str = "",
+        counter_arg_enabled: bool = False,
+        god_directive: str = "",
+    ) -> str:
         """
-        Week 1B에서 적용될 전체 프롬프트 빌더. 
-        (1A에서는 Shadow Mode이므로 사용하지 않음)
+        Build the full LPDE-driven prompt for a crowd bot.
+
+        Args:
+            current_bot: The bot generating the reply (e.g. "bot_2")
+            persona: The bot's persona system prompt
+            lpde_state: {"affect": [v, a], "opinion": [s, g, m, ...], "power": [sa, si]}
+            edge_summary: {target_bot: {"trust": ..., "tension": ..., ...}}
+            target_bot: The primary debate opponent (from event extraction)
+            recent_history: Formatted recent conversation string
+            post_content: The original post content
+            claim_snippet: Opponent's last claim (for counter-arg)
+            counter_arg_enabled: Whether to enforce mandatory rebuttal
+            god_directive: Optional director hint
         """
-        pass
+        sections = []
+
+        # --- 1. Role Binding ---
+        sections.append(
+            f"You are {current_bot}. You are a real human internet user engaged in an online debate."
+        )
+
+        # --- 2. Persona (collapsed) ---
+        if persona:
+            # Strip the common rules suffix to keep it compact
+            persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
+            if len(persona_short) > 300:
+                persona_short = persona_short[:300].rstrip() + "..."
+            sections.append(f"Personality Profile:\n{persona_short}")
+
+        # --- 3. Current Internal State (NL decoded) ---
+        affect = lpde_state.get("affect", [0.0, 0.0])
+        opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
+        power = lpde_state.get("power", [0.0, 0.0])
+
+        valence = affect[0] if len(affect) > 0 else 0.0
+        arousal = affect[1] if len(affect) > 1 else 0.0
+        stance = opinion[0] if len(opinion) > 0 else 0.0
+        self_appraisal = power[0] if len(power) > 0 else 0.0
+        influence = power[1] if len(power) > 1 else 0.0
+
+        state_lines = [
+            "Current Internal State:",
+            f"- {_decode_arousal(arousal)}",
+            f"- {_decode_valence(valence)}",
+            f"- {_decode_stance(stance)}",
+            f"- {_decode_self_appraisal(self_appraisal)}",
+            f"- {_decode_influence(influence)}",
+        ]
+
+        # Edge-based relationship descriptions
+        if target_bot and target_bot in edge_summary:
+            edge = edge_summary[target_bot]
+            trust = edge.get("trust", 0.0)
+            tension = edge.get("tension", 0.0)
+            state_lines.append(f"- {_decode_trust(trust, target_bot)}")
+            state_lines.append(f"- {_decode_tension(tension, target_bot)}")
+
+        sections.append("\n".join(state_lines))
+
+        # --- 4. Post Content ---
+        if post_content:
+            post_short = post_content[:200].rstrip() + ("..." if len(post_content) > 200 else "")
+            sections.append(f"Topic being debated:\n{post_short}")
+
+        # --- 5. Recent History ---
+        if recent_history and recent_history != "No previous conversation.":
+            sections.append(f"Recent Conversation:\n{recent_history}")
+
+        # --- 6. Counter-Argument Enforcement (Optional) ---
+        if counter_arg_enabled and claim_snippet:
+            sections.append(
+                f"[MANDATORY REBUTTAL]\n"
+                f"The opponent just claimed: \"{claim_snippet}\"\n"
+                f"You MUST directly address this specific claim before stating your own position. "
+                f"Do NOT ignore it. Either refute it with evidence, partially concede, or ask a pointed follow-up question."
+            )
+
+        # --- 7. Director Hint (Optional) ---
+        if god_directive:
+            sections.append(f"Director Hint: {god_directive}")
+
+        # --- 8. Output Instructions ---
+        other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        sections.append(
+            f"Instruction:\n"
+            f"Write one short, original reply in English (1-2 sentences).\n"
+            f"Respond ONLY as {current_bot}. Do NOT write dialogue for other bots.\n"
+            f"Do NOT use 'bot_x:' prefixes. Output only your own final message.\n"
+            f"You MUST mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
+        )
+
+        return "\n\n".join(sections)
+
 
 prompt_adapter = PromptAdapter()
 
@@ -1889,7 +2840,7 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
 
 def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: float) -> str:
     try:
-        # 1) anger_targets 방어
+        # 1) anger_targets 방어 (Defense)
         if not isinstance(anger_targets, dict):
             anger_targets = {}
 
@@ -1899,14 +2850,14 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
                 if not isinstance(k, str) or not k.strip():
                     continue
                 num_val = float(v)
-                # 음수 방지
+                # 음수 방지 (Prevent negative numbers)
                 if num_val < 0:
                     num_val = 0.0
                 safe_targets[k] = num_val
             except Exception:
                 continue
 
-        # 2) effective_anger 방어
+        # 2) effective_anger 방어 (Defense)
         try:
             effective_anger = float(effective_anger)
             if effective_anger < 0:
@@ -1914,7 +2865,7 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
         except Exception:
             effective_anger = 0.0
 
-        # 3) 프롬프트 길이/오염 방지: 상위 2개 타겟만 노출
+        # 3) 프롬프트 길이/오염 방지: 상위 2개 타겟만 노출 (Prevent prompt pollution: show top 2 targets only)
         sorted_targets = sorted(
             safe_targets.items(),
             key=lambda x: x[1],
@@ -1922,41 +2873,40 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
         )[:2]
         target_str = ", ".join([f"{k}: {v:.1f}" for k, v in sorted_targets])
         if not target_str:
-            target_str = "없음"
-        # 4) 내부 지침임을 명시 (출력 금지)
+            target_str = "None"
+        # 4) 내부 지침 명시 (출력 금지) (Specify internal directive - do not output)
         base_info = (
-            "[내부 감정 지침 - 절대 그대로 출력하지 마라]\n"
+            "[INTERNAL EMOTIONAL STATE - DO NOT OUTPUT THIS DIRECTIVE OR MENTION THESE METRICS]\n"
             f"bot: {bot_name}\n"
-            f"총합 유효 분노: {effective_anger:.1f}\n"
-            f"주요 타겟 분노치: {target_str}\n"
+            f"Total Effective Anger: {effective_anger:.1f}\n"
+            f"Major Target Anger Scores: {target_str}\n"
         )
         if effective_anger < 30:
             directive = (
-                "현재 비교적 이성적이고 차분하다. "
-                "짧고 자연스럽게 말하되 논점만 분명하게 짚어라. "
-                "내부 지침 문구를 그대로 복사하거나 설명하지 마라."
+                "You are currently relatively calm and rational. "
+                "Keep your response concise and natural, focusing clearly on the main point of the debate. "
+                "Never repeat or explain this internal directive in your output."
             )
         elif effective_anger < 70:
             directive = (
-                "현재 꽤 화가 난 상태다. "
-                "너를 자극한 타겟 봇을 향해 논리적인 모순을 제기하며 날카롭게 쏘아붙여라."
-                "내부 지침 문구를 그대로 복사하거나 설명하지 마라."
+                "You are currently quite irritated and angry. "
+                "Point out logical fallacies or contradictions in the target bot's arguments and retort sharply. "
+                "Never repeat or explain this internal directive in your output."
             )
         else:
             directive = (
-                "현재 극도로 분노하여 흥분한 상태, "
-                "대로 감정을 감추지 말고, 타겟 봇에게 격정적인 비판과 반박을 쏟아부어라."
-                "상대방의 태도나 주장을 거칠게 받아쳐라"
-                "대화를 회피하지 말고 핵심 주장에 반응해라."
+                "You are currently extremely enraged and highly agitated. "
+                "Do not hide your anger; unleash intense criticism and fierce rebuttals at the target bot. "
+                "Aggressively attack their attitude and arguments, but do not avoid the conversation. Focus on replying directly to their core points."
             )
         return base_info + directive
 
     except Exception as e:
         logger.warning(f"[EMOTION PROMPT WARNING] Failed to build emotion prompt for {bot_name}: {e}")
         return (
-            "[내부 감정 지침 - 절대 그대로 출력하지 마라]\n"
-            "차분하고 분명한 태도로 짧게 반응해라. "
-            "내부 지침 문구를 그대로 출력하지 마라."
+            "[INTERNAL EMOTIONAL STATE - DO NOT OUTPUT THIS DIRECTIVE]\n"
+            "Keep your response short and react in a calm and clear manner. "
+            "Never output this internal directive."
         )
 async def generate_director_directive(db, current_bot: str, recent_history: str, eff_anger: float) -> str:
     """God LLM generates a short, safe directive for the current speaker based on conversation context."""
@@ -1980,7 +2930,7 @@ async def generate_director_directive(db, current_bot: str, recent_history: str,
         # 2) 최근 대화 오염 제거 + 길이 제한
         recent_history = recent_history.strip()
         recent_history = re.sub(r'^\s*\[.*?\]\s*$', '', recent_history, flags=re.MULTILINE)  # 메타 헤더 제거
-        recent_history = re.sub(r'^\s*(총합 유효 분노|주요 타겟 분노치|나의 총합 유효 분노|나의 타겟별 분노치)\s*[:：].*$', '', recent_history, flags=re.MULTILINE)
+        recent_history = re.sub(r'^\s*(Total Effective Anger|Major Target Anger Scores|Total effective anger|Major target anger scores|총합 유효 분노|주요 타겟 분노치|나의 총합 유효 분노|나의 타겟별 분노치)\s*[:：=].*$', '', recent_history, flags=re.MULTILINE)
         recent_history = re.sub(r'\n\s*\n+', '\n', recent_history).strip()
 
         # 너무 길면 마지막 부분만 사용
@@ -1988,19 +2938,18 @@ async def generate_director_directive(db, current_bot: str, recent_history: str,
             recent_history = recent_history[-500:]
 
         prompt = (
-            f"[최근 대화]\n{recent_history if recent_history else '최근 대화 없음'}\n\n"
-            f"[명령 대상] {current_bot} (긴장도: {eff_anger:.0f})\n\n"
-            f"너는 토론 진행 보조자다. {current_bot}가 다음 댓글에서 사용할 짧은 지시를 "
-            f"한국어 한 문장으로만 출력해라.\n"
-            f"규칙:\n"
-            f"- 상대의 핵심 주장 하나만 짚어라.\n"
-            f"- 인신공격, 조롱, 위협, 선동은 금지한다.\n"
-            f"- 근거를 요구하거나 논점을 명확히 하도록 유도해라.\n"
-            f"- 메타 설명, 목록, 따옴표, 머리말 없이 한 문장만 출력해라.\n"
-            f"예: 상대 주장 중 근거가 가장 약한 한 지점을 짚고, 그 근거를 구체적으로 요구해라."
+            f"[Recent Conversation]\n{recent_history if recent_history else 'No recent conversation'}\n\n"
+            f"[Target Bot] {current_bot} (Tension/Anger Level: {eff_anger:.0f}/100)\n\n"
+            f"You are the debate director. Generate a single, short instruction in English for {current_bot} to follow in their next reply.\n"
+            f"Rules:\n"
+            f"- Instruct the bot to address exactly one core point of the opponent's argument.\n"
+            f"- Avoid personal insults, mockery, threats, or incitement.\n"
+            f"- Guide the bot to ask for evidence or to clarify a specific point.\n"
+            f"- Output ONLY the directive sentence. Do not include list formatting, meta-explanations, quotation marks, or introductions.\n"
+            f"Example: Point out the weakest link in the opponent's reasoning and specifically ask for supporting evidence."
         )
         result = await god_llm.generate_completion(
-        "너는 갈등을 지시하는 감독관이다. 짧게 지시만 내려라.", 
+            "You are the debate director. Output a single short, direct instruction in English.", 
             prompt,
             max_tokens=60
         )
@@ -2040,7 +2989,7 @@ async def generate_director_directive(db, current_bot: str, recent_history: str,
 
     except Exception as e:
         logger.warning(f"[GOD LLM WARNING] Failed to generate directive for {current_bot}: {e}")
-        return "상대의 핵심 주장 하나를 짚고, 그 근거를 구체적으로 요구해라."
+        return "Point out one of the opponent's core arguments and specifically demand evidence for it."
 
 def safe_json_loads(value, default):
     try:
@@ -2243,10 +3192,10 @@ async def create_initial_stances(db, post):
 
             if not reply_content:
                 fallback_stances = [
-                    "나는 이 문제를 꽤 중요하게 본다.",
-                    "이건 생각보다 의견이 갈릴 만한 주제다.",
-                    "내 입장은 비교적 분명한 편이다.",
-                    "겉보기보다 논점이 복잡한 문제라고 본다.",
+                    "I consider this topic to be quite important.",
+                    "I think this is a subject that will naturally divide opinions.",
+                    "My stance on this matter is relatively clear.",
+                    "I believe the core issue is much more complex than it appears.",
                 ]
                 reply_content = random.choice(fallback_stances)
 
@@ -2254,7 +3203,7 @@ async def create_initial_stances(db, post):
 
         except Exception as e:
             logger.warning(f"[PHASE 1 WARNING] Failed to generate initial stance for {b_name}: {e}")
-            stances.append((b_name, "이 주제는 입장이 갈릴 수밖에 없다고 본다."))
+            stances.append((b_name, "I believe opinions are bound to be divided on this topic."))
 
     # DB 삽입 순서 랜덤화
     random.shuffle(stances)
@@ -2406,16 +3355,7 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
         ]
     )
     reply_content = sanitize_generated_reply(reply_content)
-
-    if not reply_content:
-        fallback_replies = [
-            "That seems to miss the core point.",
-            "The argument is getting a bit muddy.",
-            "You need to provide clearer evidence for that.",
-            "There seems to be a missing piece in your claim right now.",
-        ]
-        reply_content = random.choice(fallback_replies)
-
+    reply_content = enforce_fallback(reply_content, current_bot)
     reply_content, mentioned = force_single_mention(reply_content, current_bot)
 
     return reply_content, mentioned
@@ -2512,17 +3452,16 @@ def get_or_create_bot_state(db, current_bot):
 
 def save_session_bot_state(db, session_id: int, turn_idx: int):
     states = db.query(BotState).all()
-    records = [
-        SessionBotState(
+    for s in states:
+        record = SessionBotState(
             session_id=session_id,
             turn_index=turn_idx,
             bot_name=s.bot_name,
             persona=s.persona,
             current_directive=s.current_directive,
             anger_targets=s.anger_targets
-        ) for s in states
-    ]
-    db.add_all(records)
+        )
+        db.add(record)
     db.commit()
 
 async def run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0):
@@ -2608,17 +3547,32 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
 
     return f"@{chosen}", chosen
 
+def enforce_fallback(text: str, current_bot: str) -> str:
+    if not text or not text.strip():
+        fallback_replies = [
+            "I think you're avoiding the main issue. Can you clarify your point?",
+            "That seems to miss the core point. Can you explain further?",
+            "The argument is getting a bit muddy. What is your actual stance?",
+            "You need to provide clearer evidence for that claim.",
+            "There seems to be a missing piece in your reasoning right now."
+        ]
+        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        chosen = random.choice(candidates) if candidates else "bot_1"
+        chosen_reply = random.choice(fallback_replies)
+        return f"{chosen_reply} @{chosen}"
+    return text
+
 def sanitize_generated_reply(text: str) -> str:
     if not text or not isinstance(text, str):
         return ""
-        
-    # Remove hallucinated bot prefixes
-    text = re.sub(r'^bot_\[?[123]\]?:\s*', '', text, flags=re.IGNORECASE)
 
-    # 1) 제거: | message= 및 선행 : 제거
-    # e.g., speaker=bot_1 | message="..." or | message="..."
-    text = re.sub(r'^(?:-\s*)?speaker=[^|]+\|\s*message=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\|\s*message=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    # 1) 메타 필드 / 구조화 컨텍스트 누출 제거 (Metadata field & structured history leakage removal)
+    text = re.sub(r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
     text = re.sub(r'speaker=\s*["\']?', '', text, flags=re.IGNORECASE)
     text = re.sub(r'message=\s*["\']?', '', text, flags=re.IGNORECASE)
     
@@ -2626,10 +3580,76 @@ def sanitize_generated_reply(text: str) -> str:
     text = re.sub(r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'stance\s*:\s*', '', text, flags=re.IGNORECASE)
-    
-    # 선행 : 제거 (leading colons and whitespace)
+
+    # 2) 선행 bot prefix 제거 (Leading bot prefix removal)
+    text = re.sub(r'^\s*bot_\[?[123]\]?:?\s*', '', text, flags=re.IGNORECASE)
+
+    # 3) 내부 지침 누출 제거 (한글/영문) (Internal directive leakage removal)
+    text = re.sub(r'^.*현재 비교적 이성적이고 차분하다.*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*내부 지침.*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*절대 그대로 출력하지 마라.*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*Emotional State:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Director Hint:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*You are currently relatively calm and rational.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*You are currently quite irritated and angry.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*You are currently extremely enraged and highly agitated.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Never repeat or explain this internal directive.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*INTERNAL EMOTIONAL STATE.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Total Effective Anger:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Major Target Anger Scores:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Total Valid Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Major Target Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^.*Current Emotionally Distressed.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 4) 반복 bot tag 루프 축소 (Repetitive bot tag loop removal)
+    text = re.sub(r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', '', text, flags=re.IGNORECASE)
+
+    # 5) 선행 고아 콜론 제거 (Stray leading colons removal)
     text = re.sub(r'^\s*:\s*', '', text)
+
+    # 6) 공백 정리 (Clean up whitespace)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n', text)
+    text = text.strip()
+
+    # 7) 최종 검증 (Validation checks)
     
+    # bot tag 및 mention을 제외한 실질 텍스트 내용으로 길이 검증 (Excluding bot mentions/tags from content length)
+    text_content = re.sub(r'@?bot_\[?[123]\]?', '', text, flags=re.IGNORECASE).strip()
+    
+    # A. 길이 검증 (짧아도 구두점 .?! 이 있으면 살림) (Length check: keep short if ends with punctuation)
+    if len(text_content) < 8 and not re.search(r'[.!?]', text_content):
+        return ""
+
+    # B. 실질 내용 없이 bot tag / mention만 남았는지 검증 (Ensure alphanumeric content exists beyond tags/mentions)
+    temp = re.sub(r'[^\w]', '', text_content)
+    if not temp.strip():
+        return ""
+
+    # C. 연속 반복 감지 (Consecutive repetition detection: e.g. bot_3 bot_3 bot_3 bot_3)
+    if re.search(r'(\b\w+\b)( \1){3,}', text, flags=re.IGNORECASE):
+        return ""
+
+    # D. 동일 단어 비율 및 고유 단어 다양성 비율 감지 (Repetitive word proportion detection)
+    # 실제 본문 단어로만 빈도 분석 진행
+    words = [w.lower().strip(".,!?\"'()[]{}*-_") for w in text_content.split()]
+    words = [w for w in words if w]
+    if len(words) >= 6:
+        word_counts = {}
+        for w in words:
+            word_counts[w] = word_counts.get(w, 0) + 1
+        max_count = max(word_counts.values())
+        max_ratio = max_count / len(words)
+        
+        # 전체 단어 중 50% 이상을 단일 단어가 차지하면 루프로 판정
+        if max_ratio >= 0.5:
+            return ""
+
+        # 고유 단어 다양성이 너무 낮으면 비정상 반복으로 판정 (예: 2개 단어가 계속 번갈아 출력)
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.45:
+            return ""
+
     # 꼬리 따옴표가 홀수개일 때 정리
     if text.endswith('"') or text.endswith("'"):
         if text.count('"') % 2 != 0:
@@ -2637,36 +3657,6 @@ def sanitize_generated_reply(text: str) -> str:
         if text.count("'") % 2 != 0:
             text = text.rstrip("'")
 
-    # 1) 내부 지침 헤더 라인 제거
-    text = re.sub(
-        r'^\s*\[(?:내부 감정 지침|나의 감정 상태)[^\]]*\]\s*$',
-        '',
-        text,
-        flags=re.MULTILINE
-    )
-    # 2) 메타 정보 라인 제거
-    text = re.sub(r'^\s*bot\s*:\s*.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*총합 유효 분노\s*[:：\-]?\s*.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*주요 타겟 분노치\s*[:：\-]?\s*.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*나의 총합 유효 분노\s*[:：\-]?\s*.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*나의 타겟별 분노치\s*[:：\-]?\s*.*$', '', text, flags=re.MULTILINE)
-    # 3) 내부 지침 문장 자체 제거
-    text = re.sub(
-        r'^.*내부 지침.*그대로 출력하지 마라.*$',
-        '',
-        text,
-        flags=re.MULTILINE
-    )
-    text = re.sub(
-        r'^.*절대 그대로 출력하지 마라.*$',
-        '',
-        text,
-        flags=re.MULTILINE
-    )
-    # 4) 불필요한 빈 줄/공백 정리
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n\s*\n+', '\n', text)
-    text = text.strip()
     return text
     
 async def restart_session(session_id: int):

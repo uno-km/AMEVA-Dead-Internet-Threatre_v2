@@ -1,7 +1,17 @@
+"""
+Layered Personality Dynamics Engine (LPDE) — Phase 2A
+
+Phase 1A: Shadow Mode (pure decay, observation only)
+Phase 2A: Event-driven state updates + Edge tensor management
+
+Active dimensions: Affect(2D), Opinion(4D), Power(2D)
+Edge tensor: Trust, Tension, Attention, Respect (4D per directed pair)
+"""
+
 import json
 import math
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 
@@ -9,27 +19,51 @@ from src.db.models import CurrentAgentState, AgentStateSnapshot, EdgeState
 
 logger = logging.getLogger("LPDE")
 
+# --- Edge update deltas per event type ---
+# Format: {"trust": delta, "tension": delta, "attention": delta, "respect": delta}
+EDGE_EVENT_DELTAS = {
+    "AGREE":    {"trust": +0.15, "tension": -0.10, "attention": +0.05, "respect": +0.10},
+    "DISAGREE": {"trust": -0.05, "tension": +0.15, "attention": +0.10, "respect":  0.00},
+    "ATTACK":   {"trust": -0.20, "tension": +0.30, "attention": +0.10, "respect": -0.15},
+    "QUESTION": {"trust":  0.00, "tension": +0.05, "attention": +0.20, "respect": +0.05},
+    "CONCEDE":  {"trust": +0.10, "tension": -0.15, "attention": +0.05, "respect": +0.10},
+    "IGNORE":   {"trust":  0.00, "tension": +0.05, "attention": -0.20, "respect": -0.05},
+    "MENTION":  {"trust":  0.00, "tension":  0.00, "attention": +0.10, "respect":  0.00},
+}
+
+# EMA decay factor for edge updates
+EDGE_EMA_RHO = 0.3
+
+# Default edge tensor (neutral)
+DEFAULT_EDGE = {"trust": 0.0, "tension": 0.0, "attention": 0.0, "respect": 0.0}
+
+
 class PersonalityEngine:
     """
     Layered Personality Dynamics Engine (LPDE)
-    Week 1A MVP: 
-    - Shadow Mode (상태만 계산/저장하고 실제 프롬프트에 즉각적인 구조 개편은 유보)
-    - 기저 성격(Traits)은 상수로, Affect(2D), Opinion(4D), Power(2D)만 업데이트
+    Phase 2A: Event-driven state updates with Edge tensor management.
     """
     def __init__(self):
-        # MVP용 기본 가중치 (추후 학습 또는 정교한 BFI-2 매핑으로 대체)
         self.clip_min = -1.0
         self.clip_max = 1.0
 
     def _clip(self, val: float) -> float:
         return max(self.clip_min, min(self.clip_max, val))
 
+    def _clip_01(self, val: float) -> float:
+        """Clip to [0, 1] range (for tension, attention)."""
+        return max(0.0, min(1.0, val))
+
     def _sigmoid_bound(self, val: float) -> float:
-        """비선형 활성화: 폭주를 막기 위해 tanh(val) 사용"""
+        """Non-linear bounding via tanh to prevent runaway values."""
         return math.tanh(val)
 
+    # =================================================================
+    # Agent State Management
+    # =================================================================
+
     def load_agent_state(self, db: Session, session_id: int, bot_name: str) -> CurrentAgentState:
-        """기존 DB에서 로드, 없으면 새로 생성"""
+        """Load existing agent state from DB, or create new one."""
         state = db.query(CurrentAgentState).filter(
             CurrentAgentState.session_id == session_id,
             CurrentAgentState.bot_name == bot_name
@@ -40,56 +74,288 @@ class PersonalityEngine:
                 bot_name=bot_name,
                 traits_json=json.dumps([0.0] * 22),
                 states_json=json.dumps([0.0] * 10),
-                affect_json=json.dumps([0.0, 0.0]), # [Valence, Arousal]
-                memory_json=json.dumps([0.0] * 8), # [Issue commitment, etc]
-                opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]), # [Stance, Gap, Moral]
-                power_json=json.dumps([0.0, 0.0]), # [SelfAppraisal, SystemicInfluence]
+                affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
+                memory_json=json.dumps([0.0] * 8),
+                opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]),  # [Stance, Gap, Moral, ...]
+                power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
                 residual_json=json.dumps([0.0] * 16)
             )
             db.add(state)
-            db.commit()
-            db.refresh(state)
+            db.flush()  # flush to get ID without committing
         return state
 
-    def update_fast_state(self, db: Session, session_id: int, bot_name: str, turn_index: int):
+    # =================================================================
+    # Edge State Management (Directed Relationship Tensors)
+    # =================================================================
+
+    def load_or_create_edge(
+        self, db: Session, session_id: int, source_bot: str, target_bot: str
+    ) -> EdgeState:
+        """Load or create a directed edge tensor R_ij."""
+        edge = db.query(EdgeState).filter(
+            EdgeState.session_id == session_id,
+            EdgeState.source_bot == source_bot,
+            EdgeState.target_bot == target_bot,
+        ).first()
+        if not edge:
+            edge = EdgeState(
+                session_id=session_id,
+                source_bot=source_bot,
+                target_bot=target_bot,
+                relation_json=json.dumps(DEFAULT_EDGE.copy()),
+            )
+            db.add(edge)
+            db.flush()
+        return edge
+
+    def get_edge_dict(self, edge: EdgeState) -> dict:
+        """Parse edge relation_json into dict safely."""
+        try:
+            d = json.loads(edge.relation_json) if edge.relation_json else {}
+            if not isinstance(d, dict):
+                return DEFAULT_EDGE.copy()
+            # Ensure all keys exist
+            for k in DEFAULT_EDGE:
+                if k not in d:
+                    d[k] = 0.0
+            return d
+        except Exception:
+            return DEFAULT_EDGE.copy()
+
+    def update_edge_state(
+        self, db: Session, session_id: int,
+        source_bot: str, target_bot: str,
+        events: list[str]
+    ) -> dict:
         """
-        턴이 끝날 때마다 호출되어 상태 공간을 업데이트합니다.
-        (현재는 난수 또는 단순 decay 기반의 MVP 로직이며, Week 1B의 Event 추출기가 완성되면 Edge 기반 업데이트 추가)
+        Update the directed edge R_{source→target} based on extracted events.
+        Uses EMA: R(t+1) = (1-ρ)·R(t) + ρ·accumulated_delta
+        Returns the updated edge dict.
+        """
+        if not target_bot or source_bot == target_bot:
+            return DEFAULT_EDGE.copy()
+
+        edge = self.load_or_create_edge(db, session_id, source_bot, target_bot)
+        current = self.get_edge_dict(edge)
+
+        # Accumulate deltas from all events
+        delta = {"trust": 0.0, "tension": 0.0, "attention": 0.0, "respect": 0.0}
+        for event_type in events:
+            event_delta = EDGE_EVENT_DELTAS.get(event_type, {})
+            for dim, val in event_delta.items():
+                delta[dim] += val
+
+        # Apply EMA update
+        updated = {}
+        for dim in DEFAULT_EDGE:
+            old_val = float(current.get(dim, 0.0))
+            delta_val = float(delta.get(dim, 0.0))
+            new_val = (1 - EDGE_EMA_RHO) * old_val + EDGE_EMA_RHO * delta_val
+
+            # Clip: trust/respect → [-1, 1], tension/attention → [0, 1]
+            if dim in ("trust", "respect"):
+                new_val = self._clip(new_val)
+            else:
+                new_val = self._clip_01(new_val)
+            updated[dim] = round(new_val, 4)
+
+        edge.relation_json = json.dumps(updated, ensure_ascii=False)
+
+        logger.info(
+            f"[EDGE] {source_bot}→{target_bot}: "
+            f"events={events} delta={delta} → {updated}"
+        )
+        return updated
+
+    # =================================================================
+    # State Update (Event-Driven)
+    # =================================================================
+
+    def update_from_event(
+        self, db: Session, session_id: int, bot_name: str,
+        event_data: dict, edge_toward_target: dict
+    ):
+        """
+        Update agent state based on extracted event data and edge state.
+        This replaces the old pure-decay logic with event-driven dynamics.
+
+        Args:
+            event_data: Output from event_extractor.extract_events()
+            edge_toward_target: Current edge dict R_{bot→target}
         """
         agent = self.load_agent_state(db, session_id, bot_name)
-        
-        # Parse current states
+
         affect = json.loads(agent.affect_json)
         opinion = json.loads(agent.opinion_json)
         power = json.loads(agent.power_json)
 
-        # [MVP Logic] 
-        # 임시로 자연스러운 Decay (0으로 회귀) 및 소규모 변동성 부여
-        # Affect: Arousal은 약간씩 가라앉고, Valence는 중립으로 회귀
-        new_affect = [
-            self._clip(self._sigmoid_bound(affect[0] * 0.9)), # Valence decay
-            self._clip(self._sigmoid_bound(affect[1] * 0.95)) # Arousal decay
+        events = event_data.get("events", [])
+        intensity = event_data.get("intensity", 0.0)
+        tension_with_target = edge_toward_target.get("tension", 0.0)
+
+        # --- Affect Update (Valence, Arousal) ---
+        # Baseline decay toward neutral
+        valence_decay = affect[0] * 0.9
+        arousal_decay = affect[1] * 0.9
+
+        # Event-driven deltas
+        delta_valence = 0.0
+        delta_arousal = 0.0
+
+        if "ATTACK" in events:
+            delta_valence -= intensity * 0.3
+            delta_arousal += intensity * 0.4
+        if "DISAGREE" in events:
+            delta_valence -= intensity * 0.15
+            delta_arousal += intensity * 0.25
+        if "AGREE" in events:
+            delta_valence += 0.15
+            delta_arousal -= 0.05
+        if "CONCEDE" in events:
+            delta_valence += 0.1
+            delta_arousal -= 0.1
+        if "QUESTION" in events:
+            delta_arousal += intensity * 0.15
+        if "IGNORE" in events:
+            delta_valence -= 0.1
+            delta_arousal += 0.08
+
+        # Edge-weighted modulation: high tension amplifies arousal
+        delta_arousal += tension_with_target * 0.2
+
+        # Combine: decay + delta, then bound
+        new_valence = self._clip(self._sigmoid_bound(valence_decay + delta_valence))
+        new_arousal = self._clip(self._sigmoid_bound(arousal_decay + delta_arousal))
+        new_affect = [round(new_valence, 4), round(new_arousal, 4)]
+
+        # --- Opinion Update (Stance, Gap, Moral, ...) ---
+        # Inertia-based decay with event perturbation
+        new_opinion = []
+        for i, o in enumerate(opinion):
+            # Stance (index 0): shift slightly based on engagement
+            if i == 0:
+                stance_delta = 0.0
+                if "AGREE" in events:
+                    stance_delta += 0.05  # reinforces current stance
+                if "DISAGREE" in events:
+                    stance_delta -= 0.03  # slight doubt
+                if "CONCEDE" in events:
+                    stance_delta -= 0.08  # significant doubt
+                new_opinion.append(self._clip(o * 0.98 + stance_delta))
+            else:
+                new_opinion.append(self._clip(o * 0.98))
+
+        # --- Power Update (SelfAppraisal, SystemicInfluence) ---
+        self_appraisal_delta = 0.0
+        influence_delta = 0.0
+
+        if "ATTACK" in events:
+            self_appraisal_delta -= 0.05
+        if "AGREE" in events:
+            self_appraisal_delta += 0.08
+            influence_delta += 0.05
+        if "CONCEDE" in events:
+            self_appraisal_delta += 0.1
+            influence_delta += 0.08
+        if "IGNORE" in events:
+            influence_delta -= 0.1
+
+        new_power = [
+            self._clip(power[0] * 0.99 + self_appraisal_delta),
+            self._clip(power[1] * 0.99 + influence_delta),
         ]
 
-        # Opinion: 자신의 입장을 고수하려는 관성(Inertia)
-        new_opinion = [self._clip(o * 0.98) for o in opinion]
+        # Write back
+        agent.affect_json = json.dumps(new_affect)
+        agent.opinion_json = json.dumps([round(v, 4) for v in new_opinion])
+        agent.power_json = json.dumps([round(v, 4) for v in new_power])
 
-        # Power: 서서히 변동
+        logger.info(
+            f"[LPDE] Event-driven update for {bot_name}: "
+            f"events={events} affect={new_affect} power={new_power}"
+        )
+
+        return agent
+
+    # =================================================================
+    # Legacy Shadow Mode Update (Phase 1A fallback)
+    # =================================================================
+
+    def update_fast_state_legacy(
+        self, db: Session, session_id: int, bot_name: str, turn_index: int
+    ):
+        """
+        Phase 1A pure-decay shadow mode (kept as fallback).
+        All state dims decay toward 0 with no event input.
+        """
+        agent = self.load_agent_state(db, session_id, bot_name)
+
+        affect = json.loads(agent.affect_json)
+        opinion = json.loads(agent.opinion_json)
+        power = json.loads(agent.power_json)
+
+        new_affect = [
+            self._clip(self._sigmoid_bound(affect[0] * 0.9)),
+            self._clip(self._sigmoid_bound(affect[1] * 0.95)),
+        ]
+        new_opinion = [self._clip(o * 0.98) for o in opinion]
         new_power = [self._clip(p * 0.99) for p in power]
 
-        # 상태 업데이트
         agent.affect_json = json.dumps(new_affect)
         agent.opinion_json = json.dumps(new_opinion)
         agent.power_json = json.dumps(new_power)
+
+        # Snapshot (no commit here — caller commits)
+        self._snapshot(db, session_id, turn_index, agent)
+
+        logger.info(f"[LPDE] Legacy shadow update for {bot_name}: Affect={new_affect}")
+
+    # =================================================================
+    # Main Update Entry Point (Phase 2A)
+    # =================================================================
+
+    def update_fast_state(
+        self, db: Session, session_id: int, bot_name: str,
+        turn_index: int, event_data: Optional[dict] = None
+    ):
+        """
+        Main entry point for per-turn state update.
+
+        Phase 2A: If event_data is provided, uses event-driven update.
+        Otherwise, falls back to legacy decay mode.
+
+        IMPORTANT: This method commits once at the end (state + snapshot + edge).
+        """
+        if event_data and event_data.get("events"):
+            target = event_data.get("target")
+
+            # 1. Update edge state
+            edge_dict = DEFAULT_EDGE.copy()
+            if target and target != bot_name:
+                edge_dict = self.update_edge_state(
+                    db, session_id, bot_name, target, event_data["events"]
+                )
+
+            # 2. Event-driven state update
+            agent = self.update_from_event(
+                db, session_id, bot_name, event_data, edge_dict
+            )
+
+            # 3. Snapshot (no commit inside)
+            self._snapshot(db, session_id, turn_index, agent)
+        else:
+            # Legacy fallback (pure decay)
+            self.update_fast_state_legacy(db, session_id, bot_name, turn_index)
+
+        # Single commit for all changes (state + snapshot + edge)
         db.commit()
 
-        # 스냅샷 저장
-        self.snapshot(db, session_id, turn_index, agent)
+    # =================================================================
+    # Snapshot (NO db.commit inside — caller handles commit)
+    # =================================================================
 
-        logger.info(f"[LPDE] Updated Shadow State for {bot_name}: Affect={new_affect}")
-
-    def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
-        """턴이 종료될 때 스냅샷 테이블에 기록"""
+    def _snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
+        """Record a turn-level snapshot. Does NOT commit — caller commits."""
         snap = AgentStateSnapshot(
             session_id=session_id,
             turn_index=turn_index,
@@ -100,9 +366,39 @@ class PersonalityEngine:
             memory_json=agent.memory_json,
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
-            residual_json=agent.residual_json
+            residual_json=agent.residual_json,
         )
         db.add(snap)
-        db.commit()
+        # NO db.commit() here — batched in update_fast_state()
+
+    # Legacy public alias (backward compat for walkthrough references)
+    def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
+        """Public alias for _snapshot. Does NOT commit."""
+        self._snapshot(db, session_id, turn_index, agent)
+
+    # =================================================================
+    # Read Helpers (for Prompt Adapter / Inspector)
+    # =================================================================
+
+    def get_current_state_dict(self, db: Session, session_id: int, bot_name: str) -> dict:
+        """Return parsed LPDE state as dict for prompt adapter consumption."""
+        agent = self.load_agent_state(db, session_id, bot_name)
+        return {
+            "affect": json.loads(agent.affect_json),
+            "opinion": json.loads(agent.opinion_json),
+            "power": json.loads(agent.power_json),
+        }
+
+    def get_edges_for_bot(self, db: Session, session_id: int, bot_name: str) -> dict:
+        """Return all outgoing edges from bot_name as {target: edge_dict}."""
+        edges = db.query(EdgeState).filter(
+            EdgeState.session_id == session_id,
+            EdgeState.source_bot == bot_name,
+        ).all()
+        result = {}
+        for e in edges:
+            result[e.target_bot] = self.get_edge_dict(e)
+        return result
+
 
 personality_engine = PersonalityEngine()
