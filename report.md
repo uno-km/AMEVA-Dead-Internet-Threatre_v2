@@ -63,6 +63,64 @@ CREATE TABLE session_bot_states (id INTEGER PRIMARY KEY AUTOINCREMENT, session_i
 
 CREATE TABLE sqlite_sequence(name,seq);
 
+CREATE TABLE current_agent_states (
+	id INTEGER NOT NULL, 
+	session_id INTEGER, 
+	bot_name VARCHAR, 
+	traits_json TEXT, 
+	states_json TEXT, 
+	affect_json TEXT, 
+	memory_json TEXT, 
+	opinion_json TEXT, 
+	power_json TEXT, 
+	residual_json TEXT, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_current_agent_state_session_bot UNIQUE (session_id, bot_name), 
+	FOREIGN KEY(session_id) REFERENCES sessions (id)
+);
+
+CREATE TABLE agent_state_snapshots (
+	id INTEGER NOT NULL, 
+	session_id INTEGER, 
+	turn_index INTEGER, 
+	bot_name VARCHAR, 
+	traits_json TEXT, 
+	states_json TEXT, 
+	affect_json TEXT, 
+	memory_json TEXT, 
+	opinion_json TEXT, 
+	power_json TEXT, 
+	residual_json TEXT, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(session_id) REFERENCES sessions (id)
+);
+
+CREATE TABLE edge_states (
+	id INTEGER NOT NULL, 
+	session_id INTEGER, 
+	source_bot VARCHAR, 
+	target_bot VARCHAR, 
+	relation_json TEXT, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(session_id) REFERENCES sessions (id)
+);
+
+CREATE TABLE intervention_logs (
+	id INTEGER NOT NULL, 
+	session_id INTEGER, 
+	turn_index INTEGER, 
+	target_bot VARCHAR, 
+	kind VARCHAR, 
+	delta_json TEXT, 
+	reason TEXT, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(session_id) REFERENCES sessions (id)
+);
+
 ```
 
 ### File: `docker/docker-compose.yml`
@@ -86,6 +144,9 @@ services:
       - PORT=8050
       - DATABASE_URL=sqlite:////AMEVA-DeadInternetSociety/ameva_society.db
       - PYTHONPATH=/AMEVA-DeadInternetSociety
+      - LPDE_STRUCTURED_HISTORY=true
+      - LPDE_FULL_PROMPT=false
+      - LPDE_LEGACY_PROMPT=false
     depends_on:
       - llm-main
       - llm-bot-1
@@ -189,8 +250,9 @@ networks:
 ### File: `run.py`
 ```python
 import asyncio
+from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, Query
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session as DbSession
@@ -295,11 +357,22 @@ async def get_bot_states(db: DbSession = Depends(get_db)):
     return {"states": bot_states, "session_status": session_status}
 
 @app.get("/api/lpde/state")
-async def get_lpde_states(db: DbSession = Depends(get_db)):
+async def get_lpde_states(
+    session_id: int | None = Query(default=None),
+    db: DbSession = Depends(get_db)
+):
     import json
-    from src.db.models import CurrentAgentState
+    from src.db.models import CurrentAgentState, Session
     
-    lpde_states = db.query(CurrentAgentState).all()
+    if session_id is None:
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        session_id = latest_session.id if latest_session else None
+
+    q = db.query(CurrentAgentState)
+    if session_id is not None:
+        q = q.filter(CurrentAgentState.session_id == session_id)
+        
+    lpde_states = q.all()
     results = []
     for s in lpde_states:
         def safe_load(val):
@@ -316,7 +389,16 @@ async def get_lpde_states(db: DbSession = Depends(get_db)):
             "power": safe_load(s.power_json),
             "updated_at": s.updated_at.strftime("%Y-%m-%d %H:%M:%S") if s.updated_at else None
         })
-    return {"lpde_states": results}
+    if not results:
+        return {
+            "session_id": session_id,
+            "message": "No LPDE state yet for this session",
+            "lpde_states": []
+        }
+    return {
+        "session_id": session_id,
+        "lpde_states": results
+    }
 
 @app.get("/api/system/status")
 async def get_system_status():
@@ -465,7 +547,7 @@ def main():
     print("  pause          - Soft pause the current session")
     print("  resume         - Resume a paused session")
     print("  stop           - Force stop the current session")
-    print("  restart <id>   - Restore and continue an old session")
+    print("  restart <post_id> - Restore and continue an old session")
     print("  exit           - Close this remote controller")
     print("========================================")
     
@@ -504,9 +586,9 @@ def main():
                 if len(user_input) > 1 and user_input[1].isdigit():
                     if send_command("restart", user_input[1]):
                         if wait_for_state("RUNNING", 10):
-                            print(f"[완료] {user_input[1]}번 세션 이어하기(RUNNING)를 시작합니다!")
+                            print(f"[완료] {user_input[1]}번 글(Post)의 세션 이어하기(RUNNING)를 시작합니다!")
                 else:
-                    print("Usage: restart <session_id>")
+                    print("Usage: restart <post_id>")
             else:
                 print(f"Unknown command: {cmd}")
         except KeyboardInterrupt:
@@ -772,6 +854,7 @@ class PersonalityEngine:
                 traits_json=json.dumps([0.0] * 22),
                 states_json=json.dumps([0.0] * 10),
                 affect_json=json.dumps([0.0, 0.0]), # [Valence, Arousal]
+                memory_json=json.dumps([0.0] * 8), # [Issue commitment, etc]
                 opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]), # [Stance, Gap, Moral]
                 power_json=json.dumps([0.0, 0.0]), # [SelfAppraisal, SystemicInfluence]
                 residual_json=json.dumps([0.0] * 16)
@@ -859,6 +942,7 @@ class PromptAdapter:
         """
         기존 "bot_1: 텍스트" 형식을 탈피하고 구조화된 로그 형태로 변환합니다.
         items는 {"bot_name": ..., "message": ...} 형태의 딕셔너리 리스트입니다.
+        출력 포맷: '- speaker=... | message="..."'
         """
         if not items:
             return "No previous conversation."
@@ -867,8 +951,10 @@ class PromptAdapter:
         for item in items:
             bot_name = item.get("bot_name", "Unknown")
             msg = item.get("message", "").strip()
+            import json
+            msg_json = json.dumps(msg, ensure_ascii=False)
             # 봇 이름이나 사람 이름을 명확히 분리하고, message를 데이터 필드로 취급
-            line = f"- speaker={bot_name} | message=\"{msg}\""
+            line = f'- speaker={bot_name} | message={msg_json}'
             structured_lines.append(line)
         
         return "\n".join(structured_lines)
@@ -954,7 +1040,7 @@ def get_db():
 
 ### File: `src/db/models.py`
 ```python
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from src.db.database import Base
@@ -1019,6 +1105,9 @@ class SessionBotState(Base):
 class CurrentAgentState(Base):
     """현재 LPDE 에이전트 상태 (Shadow Mode)"""
     __tablename__ = 'current_agent_states'
+    __table_args__ = (
+        UniqueConstraint('session_id', 'bot_name', name='uq_current_agent_state_session_bot'),
+    )
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey('sessions.id'), index=True)
     bot_name = Column(String, index=True)
@@ -1993,6 +2082,7 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
     # [LPDE Feature Flags]
     LPDE_STRUCTURED_HISTORY = os.getenv("LPDE_STRUCTURED_HISTORY", "true").lower() == "true"
     LPDE_FULL_PROMPT = os.getenv("LPDE_FULL_PROMPT", "false").lower() == "true"
+    LPDE_LEGACY_PROMPT = os.getenv("LPDE_LEGACY_PROMPT", "false").lower() == "true"
 
     # [LPDE Phase 1A] Shadow Mode Update
     from src.core.personality_engine import personality_engine
@@ -2004,14 +2094,23 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
     god_directive = await generate_director_directive(db, current_bot, recent_history, eff_anger)
 
     if LPDE_FULL_PROMPT:
-        # Phase 1B: 추후 PromptAdapter를 활용해 완전히 구조화된 LPDE 프롬프트 생성
+        # Phase 1B Placeholder: 추후 PromptAdapter를 활용해 완전히 구조화된 LPDE 프롬프트 생성 (현재는 임시 기능)
         prompt = (
             f"Post Content: {post.content}\n\n"
             f"{recent_history if recent_history else 'No recent conversation'}\n\n"
             f"[System] You are {current_bot}. Respond to the above conversation based on your internal LPDE state.\n"
         )
+    elif LPDE_LEGACY_PROMPT:
+        # 진짜 legacy prompt 유지 (Shadow Mode 비교용)
+        prompt = (
+            f"Post Content: {post.content}\n\n"
+            f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
+            f"Instruction: State your opinion by either refuting or agreeing with the recent conversation in 1-2 sentences. Reply in English.\n"
+            f"DO NOT write a chat script. DO NOT use 'bot_x:' prefixes. Just output your own statement directly.\n"
+            f"You MUST mention exactly one of '@bot_1', '@bot_2', or '@bot_3' at the end of your message (do NOT mention yourself).\n"
+        )
     else:
-        # Phase 1A: 기존 프롬프트 구조 유지 (Shadow Mode)
+        # Phase 1A: 구조 강화된 prompt (shadow mode + hardening)
         prompt = (
             f"Post Content: {post.content}\n\n"
             f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
@@ -2039,7 +2138,8 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
             "\n\n",
             "\nbot_1:", "\nbot_2:", "\nbot_3:",
             "\nBot_1:", "\nBot_2:", "\nBot_3:",
-            "\nspeaker=", "\nSpeaker="
+            "\nspeaker=", "\nSpeaker=",
+            "\n- speaker="
         ]
     )
     reply_content = sanitize_generated_reply(reply_content)
@@ -2223,10 +2323,12 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
         chosen = random.choice(candidates) if candidates else "bot_1"
         return f"@{chosen}", chosen
 
-    matches = re.findall(r'@(bot_[123])(?!\d)', text, flags=re.IGNORECASE)
-    matches = [m.lower() for m in matches if m.lower() != current_bot]
+    matches = re.findall(r'@(bot_\[?[123]\]?)(?!\d)', text, flags=re.IGNORECASE)
+    # Normalize bot name by removing brackets for comparison
+    matches = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
+    matches = [m for m in matches if m != current_bot]
 
-    cleaned = re.sub(r'@(bot_[123])(?!\d)', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'@(bot_\[?[123]\]?)(?!\d)', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.!?])', r'\1', cleaned)
     cleaned = cleaned.strip(" ,")
@@ -2247,7 +2349,7 @@ def sanitize_generated_reply(text: str) -> str:
         return ""
         
     # Remove hallucinated bot prefixes
-    text = re.sub(r'^bot_[123]:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^bot_\[?[123]\]?:\s*', '', text, flags=re.IGNORECASE)
 
     # 1) 내부 지침 헤더 라인 제거
     text = re.sub(

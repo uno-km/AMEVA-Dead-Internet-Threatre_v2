@@ -692,45 +692,71 @@ async def create_post_with_main_llm(db, session):
     logger.info("[ROUTING] Requesting llm-main (8B) to generate a new topic...")
 
     post_content = ""
+    title = "새로운 논쟁 거리"
 
     try:
-        async with llm_lifecycle("ameva-llm-main", 8101) as is_ready:
+        async with llm_lifecycle("ameva-llm-main", 8101, timeout=180) as is_ready:
             if not is_ready:
                 logger.warning("[LLM-MAIN] main container was not ready. Falling back to static topics.")
             else:
-                post_content = await main_llm.generate_completion(
-                    "You are an anonymous community forum user. Write a short, controversial post on a random topic. Write in English only.",
-                    "Write a new post.",
-                    max_tokens=300
+                prompt = (
+                    "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
+                    "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
+                    "{\n"
+                    '  "title": "A highly compelling and controversial title",\n'
+                    '  "content": "Your post content details..."\n'
+                    "}"
                 )
+                result = await main_llm.generate_completion(
+                    "You are an AI that writes forum posts. You only respond in JSON format.",
+                    prompt,
+                    max_tokens=500,
+                    timeout=180.0,
+                    response_format={"type": "json_object"}
+                )
+                
+                # JSON 파싱 시도
+                if result:
+                    result = result.strip()
+                    json_str = None
+                    markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
+                    if markdown_match:
+                        json_str = markdown_match.group(1).strip()
+                    else:
+                        start_idx = result.find("{")
+                        end_idx = result.rfind("}")
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            json_str = result[start_idx:end_idx + 1]
+                    
+                    if json_str:
+                        try:
+                            data = json.loads(json_str)
+                            title = data.get("title", title).strip()
+                            post_content = data.get("content", "").strip()
+                        except json.JSONDecodeError as e:
+                            logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
+                    else:
+                        logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
     except Exception as e:
         logger.error(f"[LLM-MAIN] Error generating topic: {e}")
 
-    post_content = normalize_post_content(post_content)
-
-    title = "새로운 논쟁 거리"
-    if post_content:
-        # Extract title if the LLM output something like **Title:** ...
-        title_match = re.search(r'\*\*Title:\*\*\s*([^\n]+)', post_content, re.IGNORECASE)
-        if title_match:
-            title = title_match.group(1).strip()
-            # Remove the title line from content
-            post_content = re.sub(r'\*\*Title:\*\*\s*[^\n]+\n?', '', post_content, flags=re.IGNORECASE).strip()
-        
-        # Remove "Posted by: ..." if present
-        post_content = re.sub(r'\*\*Posted by:\*\*\s*[^\n]+\n?', '', post_content, flags=re.IGNORECASE).strip()
-    else:
+    # Fallback 로직
+    if not post_content:
         fallback_topics = [
-            "Is it really a good thing that AI is replacing human jobs?",
-            "Do you agree that the younger generation has no manners these days?",
-            "With housing prices so high, is marriage really necessary?",
-            "What's more important: academic pedigree or actual skills? Let's be honest.",
-            "Are people who raise pets more selfish than people who raise children?",
-            "Should mandatory military service be abolished or maintained?",
-            "Can being a YouTuber or streamer really be considered a real job?",
-            "Is the minimum wage for convenience store workers too low, or appropriate?",
+            ("AI and Jobs", "Is it really a good thing that AI is replacing human jobs?"),
+            ("Modern Manners", "Do you agree that the younger generation has no manners these days?"),
+            ("Marriage in Modern Times", "With housing prices so high, is marriage really necessary?"),
+            ("Pedigree vs Skills", "What's more important: academic pedigree or actual skills? Let's be honest."),
+            ("Pets vs Children", "Are people who raise pets more selfish than people who raise children?"),
+            ("Military Service", "Should mandatory military service be abolished or maintained?"),
+            ("Content Creators", "Can being a YouTuber or streamer really be considered a real job?"),
+            ("Minimum Wage", "Is the minimum wage for convenience store workers too low, or appropriate?"),
         ]
-        post_content = random.choice(fallback_topics)
+        fallback_item = random.choice(fallback_topics)
+        title = fallback_item[0]
+        post_content = fallback_item[1]
+
+    post_content = normalize_post_content(post_content)
 
     post = Post(session_id=session.id, title=title, content=post_content)
     db.add(post)
@@ -858,7 +884,7 @@ async def create_initial_stances(db, post):
 
     return stances, last_comment, last_speaker
 
-def build_turn_context(db, post, current_bot, use_structured=False):
+async def build_turn_context(db, post, current_bot, use_structured=False):
     bot_state = get_or_create_bot_state(db, current_bot)
 
     anger_dict = safe_json_loads(bot_state.anger_targets, {})
@@ -883,7 +909,7 @@ def build_turn_context(db, post, current_bot, use_structured=False):
         .all()
     )
 
-    def _format_recent_history(items):
+    async def _format_recent_history(items):
         valid_items = []
         for item in reversed(items):
             if not item or not item.content:
@@ -895,14 +921,14 @@ def build_turn_context(db, post, current_bot, use_structured=False):
 
         if use_structured:
             from src.core.prompt_adapter import prompt_adapter
-            return prompt_adapter.build_structured_history(valid_items)
+            return await prompt_adapter.build_structured_history(valid_items)
         else:
             lines = []
             for item in valid_items:
                 lines.append(f"{item['bot_name']}: {item['message']}")
             return "\n".join(lines).strip()
 
-    recent_history = _format_recent_history(recent_c)
+    recent_history = await _format_recent_history(recent_c)
 
     if len(recent_history) > 600:
         recent_history = recent_history[-600:]
@@ -924,7 +950,7 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
     from src.core.personality_engine import personality_engine
     personality_engine.update_fast_state(db, post.session_id, current_bot, turn_index=turn_idx)
 
-    safe_anger_dict, eff_anger, emotion_directive, recent_history = build_turn_context(
+    safe_anger_dict, eff_anger, emotion_directive, recent_history = await build_turn_context(
         db, post, current_bot, use_structured=LPDE_STRUCTURED_HISTORY
     )
     god_directive = await generate_director_directive(db, current_bot, recent_history, eff_anger)
@@ -975,7 +1001,10 @@ async def generate_relay_reply(db, post, current_bot, turn_idx=0):
             "\nbot_1:", "\nbot_2:", "\nbot_3:",
             "\nBot_1:", "\nBot_2:", "\nBot_3:",
             "\nspeaker=", "\nSpeaker=",
-            "\n- speaker="
+            "\n- speaker=",
+            "| message=", "|message=",
+            "- speaker=", "speaker=",
+            "'s stance:", "stance:"
         ]
     )
     reply_content = sanitize_generated_reply(reply_content)
@@ -1186,6 +1215,28 @@ def sanitize_generated_reply(text: str) -> str:
         
     # Remove hallucinated bot prefixes
     text = re.sub(r'^bot_\[?[123]\]?:\s*', '', text, flags=re.IGNORECASE)
+
+    # 1) 제거: | message= 및 선행 : 제거
+    # e.g., speaker=bot_1 | message="..." or | message="..."
+    text = re.sub(r'^(?:-\s*)?speaker=[^|]+\|\s*message=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\|\s*message=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'speaker=\s*["\']?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'message=\s*["\']?', '', text, flags=re.IGNORECASE)
+    
+    # stance leakage 제거
+    text = re.sub(r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'stance\s*:\s*', '', text, flags=re.IGNORECASE)
+    
+    # 선행 : 제거 (leading colons and whitespace)
+    text = re.sub(r'^\s*:\s*', '', text)
+    
+    # 꼬리 따옴표가 홀수개일 때 정리
+    if text.endswith('"') or text.endswith("'"):
+        if text.count('"') % 2 != 0:
+            text = text.rstrip('"')
+        if text.count("'") % 2 != 0:
+            text = text.rstrip("'")
 
     # 1) 내부 지침 헤더 라인 제거
     text = re.sub(

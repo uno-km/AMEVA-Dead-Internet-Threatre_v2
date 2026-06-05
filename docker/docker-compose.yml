@@ -49,7 +49,7 @@ services:
       - "8102:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -61,7 +61,7 @@ services:
       - "8103:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -73,7 +73,7 @@ services:
       - "8104:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-0.5b.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no

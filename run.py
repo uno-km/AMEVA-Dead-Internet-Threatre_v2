@@ -149,6 +149,138 @@ async def get_lpde_states(
         "lpde_states": results
     }
 
+@app.get("/api/sessions")
+async def get_sessions(db: DbSession = Depends(get_db)):
+    from src.db.models import Session
+    sessions = db.query(Session).order_by(Session.id.desc()).all()
+    return [{"id": s.id, "status": s.status, "created_at": s.created_at.strftime("%Y-%m-%d %H:%M:%S")} for s in sessions]
+
+@app.get("/api/lpde/bot/{bot_name}")
+async def get_bot_inspector_detail(
+    bot_name: str,
+    session_id: int | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: DbSession = Depends(get_db)
+):
+    import json
+    from src.db.models import Session, BotState, CurrentAgentState, AgentStateSnapshot, EdgeState, InterventionLog
+    from src.orchestration.runner import calculate_effective_anger
+
+    if session_id is None:
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        session_id = latest_session.id if latest_session else None
+
+    # Base legacy state
+    bot_state = db.query(BotState).filter(BotState.bot_name == bot_name).first()
+    persona = bot_state.persona if bot_state else ""
+    current_directive = bot_state.current_directive if bot_state else ""
+    try:
+        anger_dict = json.loads(bot_state.anger_targets) if bot_state and bot_state.anger_targets else {}
+    except:
+        anger_dict = {}
+    effective_anger = calculate_effective_anger(anger_dict)
+
+    # Current Agent State (LPDE Tensors)
+    current_state = db.query(CurrentAgentState).filter(
+        CurrentAgentState.session_id == session_id,
+        CurrentAgentState.bot_name == bot_name
+    ).first()
+
+    def safe_load(val):
+        try:
+            return json.loads(val) if val else []
+        except:
+            return []
+
+    lpde_tensors = {
+        "traits": safe_load(current_state.traits_json) if current_state else [],
+        "states": safe_load(current_state.states_json) if current_state else [],
+        "affect": safe_load(current_state.affect_json) if current_state else [],
+        "memory": safe_load(current_state.memory_json) if current_state else [],
+        "opinion": safe_load(current_state.opinion_json) if current_state else [],
+        "power": safe_load(current_state.power_json) if current_state else [],
+        "residual": safe_load(current_state.residual_json) if current_state else []
+    }
+    
+    # Deltas
+    snapshots = db.query(AgentStateSnapshot).filter(
+        AgentStateSnapshot.session_id == session_id,
+        AgentStateSnapshot.bot_name == bot_name
+    ).order_by(AgentStateSnapshot.turn_index.desc()).limit(limit).all()
+    
+    deltas = {}
+    if len(snapshots) >= 2:
+        latest_snap = snapshots[0]
+        prev_snap = snapshots[1]
+        
+        # Simple delta calculation for affect/opinion/power vectors
+        def calc_delta(latest_val, prev_val):
+            l_list = safe_load(latest_val)
+            p_list = safe_load(prev_val)
+            res = []
+            for l, p in zip(l_list, p_list):
+                if isinstance(l, (int, float)) and isinstance(p, (int, float)):
+                    res.append(round(l - p, 3))
+                else:
+                    res.append(0)
+            return res
+            
+        deltas = {
+            "affect": calc_delta(latest_snap.affect_json, prev_snap.affect_json),
+            "opinion": calc_delta(latest_snap.opinion_json, prev_snap.opinion_json),
+            "power": calc_delta(latest_snap.power_json, prev_snap.power_json)
+        }
+
+    # Time series (reverse order so oldest first)
+    time_series = []
+    for snap in reversed(snapshots):
+        time_series.append({
+            "turn_index": snap.turn_index,
+            "affect": safe_load(snap.affect_json),
+            "opinion": safe_load(snap.opinion_json),
+            "power": safe_load(snap.power_json)
+        })
+
+    # Edges
+    edges = db.query(EdgeState).filter(
+        EdgeState.session_id == session_id,
+        (EdgeState.source_bot == bot_name) | (EdgeState.target_bot == bot_name)
+    ).all()
+    
+    def safe_load_dict(val):
+        try:
+            return json.loads(val) if val else {}
+        except:
+            return {}
+
+    edges_data = [{"source": e.source_bot, "target": e.target_bot, "relation": safe_load_dict(e.relation_json)} for e in edges]
+
+    # Interventions
+    interventions = db.query(InterventionLog).filter(
+        InterventionLog.session_id == session_id,
+        InterventionLog.target_bot == bot_name
+    ).order_by(InterventionLog.turn_index.desc()).all()
+    interventions_data = [{"turn_index": i.turn_index, "kind": i.kind, "delta": safe_load_dict(i.delta_json), "reason": i.reason} for i in interventions]
+
+    return {
+        "bot_name": bot_name,
+        "session_id": session_id,
+        "updated_at": current_state.updated_at.strftime("%Y-%m-%d %H:%M:%S") if current_state and current_state.updated_at else None,
+        "phase": "shadow_updater_1A",
+        "active_dims": ["affect", "opinion", "power"],
+        "legacy_state": {
+            "persona": persona,
+            "current_directive": current_directive,
+            "effective_anger": effective_anger,
+            "anger_targets": anger_dict
+        },
+        "lpde_tensors": lpde_tensors,
+        "deltas": deltas,
+        "time_series": time_series,
+        "edges": edges_data,
+        "interventions": interventions_data
+    }
+
 @app.get("/api/system/status")
 async def get_system_status():
     import subprocess

@@ -6,9 +6,17 @@ logger = logging.getLogger("LLMClient")
 class LLMClient:
     def __init__(self, base_url: str):
         self.base_url = base_url
-        self.timeout = 60.0
+        self.timeout = 180.0
 
-    async def generate_completion(self, system_prompt: str, user_prompt: str, max_tokens: int = 512, stop=None) -> str:
+    async def generate_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 512,
+        stop=None,
+        timeout: float = None,
+        response_format=None
+    ) -> str:
         """
         Llama.cpp Server API (/v1/chat/completions) 호출
         """
@@ -24,10 +32,14 @@ class LLMClient:
         }
         if stop:
             payload["stop"] = stop
+        if response_format:
+            payload["response_format"] = response_format
+
+        req_timeout = timeout if timeout is not None else self.timeout
 
         try:
-            logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens})")
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens}, Timeout: {req_timeout})")
+            async with httpx.AsyncClient(timeout=req_timeout) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()

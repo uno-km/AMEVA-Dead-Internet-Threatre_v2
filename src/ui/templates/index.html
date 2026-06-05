@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AMEVA - Dead Internet Society</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         .glass {
             background: rgba(255, 255, 255, 0.75);
@@ -34,6 +35,10 @@
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* Toggle Switch CSS */
+        input:checked ~ .dot { transform: translateX(100%); }
+        input:checked ~ .block { background-color: #4f46e5; }
     </style>
 </head>
 <body class="bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden">
@@ -110,11 +115,102 @@
         </main>
     </div>
 
+    <!-- Bot Inspector Drawer -->
+    <div id="inspector-overlay" class="fixed inset-0 bg-black bg-opacity-20 z-40 hidden" onclick="closeInspector()"></div>
+    <div id="inspector-drawer" class="fixed top-0 right-0 h-full w-[450px] bg-white bg-opacity-95 backdrop-blur-md shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col border-l border-indigo-100">
+        <!-- Header -->
+        <div class="p-5 border-b flex justify-between items-center bg-indigo-50">
+            <div>
+                <div class="flex items-center gap-2">
+                    <h2 class="text-2xl font-black text-indigo-900 uppercase" id="inspector-bot-name">BOT</h2>
+                    <span class="text-xs font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200" id="inspector-phase">Phase: Unknown</span>
+                </div>
+                <div class="flex items-center gap-3 mt-2">
+                    <select id="inspector-session-select" class="text-xs bg-white border border-gray-300 text-gray-700 rounded px-2 py-1 focus:outline-none focus:border-indigo-500 w-32" onchange="fetchInspectorData(true)">
+                        <option value="">Latest Session</option>
+                    </select>
+                    <label class="flex items-center cursor-pointer">
+                        <div class="relative">
+                            <input type="checkbox" id="inspector-auto-refresh" class="sr-only" checked onchange="toggleAutoRefresh()">
+                            <div class="block bg-gray-300 w-8 h-4 rounded-full"></div>
+                            <div class="dot absolute left-1 top-0.5 bg-white w-3 h-3 rounded-full transition transform"></div>
+                        </div>
+                        <div class="ml-2 text-xs font-bold text-gray-500">Auto Refresh</div>
+                    </label>
+                </div>
+            </div>
+            <button onclick="closeInspector()" class="text-gray-400 hover:text-gray-700 p-2 rounded-full hover:bg-gray-200">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        
+        <div class="flex-1 overflow-y-auto p-5 space-y-6">
+            <!-- Persona & Directive -->
+            <div>
+                <details class="mb-2 text-sm text-gray-600 bg-gray-50 p-2 rounded border cursor-pointer">
+                    <summary class="font-bold text-gray-800">Persona Profile</summary>
+                    <div class="mt-2 text-xs" id="inspector-persona"></div>
+                </details>
+                <div class="bg-indigo-100 border-l-4 border-indigo-500 p-3 rounded">
+                    <div class="text-xs font-bold text-indigo-800 mb-1">Current Directive</div>
+                    <div class="text-sm font-medium text-indigo-900" id="inspector-directive">...</div>
+                </div>
+            </div>
+
+            <!-- Vector Summary Chips -->
+            <div>
+                <h3 class="text-sm font-bold text-gray-800 mb-2 flex items-center justify-between">
+                    <span>Primary Vectors</span>
+                    <span class="text-[10px] text-gray-400 font-normal">* Delta vs prev. turn</span>
+                </h3>
+                <div class="grid grid-cols-2 gap-2" id="inspector-summary-chips">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- Radar Chart -->
+            <div class="bg-white p-3 rounded-xl border shadow-sm">
+                <h3 class="text-sm font-bold text-gray-800 mb-2">Dimensional Profile</h3>
+                <canvas id="radarChart" width="400" height="300"></canvas>
+            </div>
+
+            <!-- Time Series Chart -->
+            <div class="bg-white p-3 rounded-xl border shadow-sm">
+                <h3 class="text-sm font-bold text-gray-800 mb-2 flex justify-between">
+                    <span>State Trajectory</span>
+                    <span class="text-xs text-gray-400 font-normal">Last 50 turns</span>
+                </h3>
+                <canvas id="lineChart" width="400" height="200"></canvas>
+            </div>
+
+            <!-- Interventions -->
+            <div>
+                <h3 class="text-sm font-bold text-gray-800 mb-2">God Interventions</h3>
+                <div id="inspector-interventions" class="space-y-2 max-h-40 overflow-y-auto text-xs bg-gray-50 p-2 rounded border">
+                    <div class="text-gray-400 italic text-center py-2">No recent interventions</div>
+                </div>
+            </div>
+
+            <!-- Raw Data Accordion -->
+            <details class="text-xs bg-gray-900 text-green-400 rounded p-2 overflow-hidden shadow-inner">
+                <summary class="font-bold text-gray-300 cursor-pointer">Raw LPDE Tensors</summary>
+                <pre id="inspector-raw-json" class="mt-2 whitespace-pre-wrap max-h-60 overflow-y-auto p-2 border-t border-gray-700"></pre>
+            </details>
+        </div>
+    </div>
+
     <script>
         let currentPostId = null;
+        let currentGlobalSessionId = null;
         let knownCommentIds = new Set();
         let systemStatusMap = {};
         
+        // Inspector State
+        let inspectorOpenBot = null;
+        let inspectorAutoRefresh = true;
+        let radarChartInstance = null;
+        let lineChartInstance = null;
+
         // --- Fetch System Status ---
         async function fetchSystemStatus() {
             try {
@@ -148,7 +244,6 @@
                 const res = await fetch('/api/bots/state');
                 const data = await res.json();
                 
-                // Status badge
                 const badge = document.getElementById('session-status-badge');
                 if (data.session_status === 'ACTIVE') {
                     badge.className = "text-xs px-2 py-1 rounded-full font-bold bg-green-200 text-green-800";
@@ -164,7 +259,6 @@
                     hidePoliceWarning();
                 }
 
-                // Bot states list
                 const container = document.getElementById('bot-states-container');
                 container.innerHTML = '';
                 
@@ -183,8 +277,9 @@
 
                         let directiveText = bot.current_directive ? `<div class="mt-2 text-xs font-medium text-indigo-700 bg-indigo-50 p-2 rounded border border-indigo-100">🗣️ <b>현재 지침:</b> ${bot.current_directive}</div>` : '';
 
+                        // Add cursor-pointer and onclick
                         container.innerHTML += `
-                            <div class="bg-white bg-opacity-50 p-3 rounded-xl border-2 ${isRunning ? 'border-green-300' : 'border-transparent'} transition-colors duration-500">
+                            <div onclick="openInspector('${bot.bot_name}')" class="cursor-pointer hover:bg-indigo-50 hover:shadow-md bg-white bg-opacity-50 p-3 rounded-xl border-2 ${isRunning ? 'border-green-300' : 'border-transparent'} transition-all duration-300 transform hover:-translate-y-1">
                                 <div class="flex justify-between items-end mb-1">
                                     <span class="font-bold text-gray-800 flex items-center">${statusDot}${bot.bot_name.toUpperCase()}</span>
                                     <span class="text-xs font-black ${eff >= 50 ? 'text-red-600' : 'text-gray-500'}">Vector: ${eff.toFixed(1)}</span>
@@ -219,7 +314,6 @@
                     return;
                 }
 
-                // If no post selected, select the latest one
                 if (!currentPostId) {
                     selectPost(posts[0].id);
                 }
@@ -242,14 +336,13 @@
             }
         }
 
-        // --- Select and Fetch Specific Post ---
         function selectPost(id) {
             if (currentPostId !== id) {
                 currentPostId = id;
-                knownCommentIds.clear(); // Reset seen comments
-                document.getElementById('comments-container').innerHTML = ''; // Clear UI
+                knownCommentIds.clear();
+                document.getElementById('comments-container').innerHTML = '';
                 fetchPostDetail();
-                fetchPostList(); // Re-render list to update active state
+                fetchPostList();
             }
         }
 
@@ -263,45 +356,21 @@
 
         async function fetchPostDetail() {
             if (!currentPostId) return;
-            
             try {
                 const res = await fetch(`/api/posts/${currentPostId}`);
                 const data = await res.json();
-                
                 if (data.error) return;
 
-                // Update Header
                 document.getElementById('current-post-id').innerText = `POST #${data.id}`;
                 document.getElementById('current-post-title').innerText = data.title;
                 document.getElementById('current-post-content').innerText = data.content;
                 document.getElementById('current-post-date').innerText = data.created_at;
 
-                // Render Comments
                 const container = document.getElementById('comments-container');
                 let newCommentAdded = false;
-
-                // Group by parent_id
-                const rootComments = data.comments.filter(c => !c.parent_id);
-                const repliesMap = {};
-                data.comments.forEach(c => {
-                    if (c.parent_id) {
-                        if (!repliesMap[c.parent_id]) repliesMap[c.parent_id] = [];
-                        repliesMap[c.parent_id].push(c);
-                    }
-                });
-
-                // Rebuild UI optimally (For simplicity, if there's a new comment, we can just append or re-render carefully)
-                // To avoid flickering, we will only append elements that we haven't seen.
-                // However, since comments can be threaded, a full re-render with popIn on new ones is safer for this prototype.
-                
                 let htmlBuffer = '';
                 
-                // We will just do a full string build, but mark new ones with the animation class
                 data.comments.forEach(c => {
-                    // For simplicity, we just render flat list with slight indent for replies
-                    // Since orchestrator doesn't heavily nest beyond depth 1, flat rendering based on order is fine.
-                    // Let's just render them chronologically as an Agora feed.
-                    
                     const isNew = !knownCommentIds.has(c.id);
                     if (isNew) {
                         knownCommentIds.add(c.id);
@@ -312,7 +381,6 @@
                     const avatarColor = getAvatarColor(c.bot_name);
                     const mentionHtml = c.mentioned_bot ? `<span class="text-xs font-bold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded ml-2">@${c.mentioned_bot}</span>` : '';
                     
-                    // Simple flat feed layout
                     htmlBuffer += `
                         <div class="bg-white bg-opacity-70 rounded-2xl p-4 shadow-sm border border-white flex gap-4 ${animClass}">
                             <div class="flex-shrink-0">
@@ -338,22 +406,18 @@
                 if (htmlBuffer !== container.innerHTML) {
                     container.innerHTML = htmlBuffer;
                     if (newCommentAdded) {
-                        // Scroll to bottom
                         const scrollArea = document.getElementById('comments-scroll-area');
                         scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
                     }
                 }
-
             } catch (err) {
                 console.error("Post detail fetch error:", err);
             }
         }
 
-        // --- Police Warning overlay ---
         function showPoliceWarning() {
             const el = document.getElementById('police-warning');
             el.classList.remove('hidden');
-            // Small delay to allow CSS transition
             setTimeout(() => {
                 el.classList.remove('opacity-0');
                 el.classList.add('opacity-100');
@@ -366,7 +430,248 @@
             el.classList.add('opacity-0');
             setTimeout(() => {
                 el.classList.add('hidden');
-            }, 1000); // match duration-1000
+            }, 1000);
+        }
+
+        // --- Bot Inspector Logic ---
+
+        function toggleAutoRefresh() {
+            inspectorAutoRefresh = document.getElementById('inspector-auto-refresh').checked;
+        }
+
+        function openInspector(botName) {
+            inspectorOpenBot = botName;
+            document.getElementById('inspector-bot-name').innerText = botName;
+            document.getElementById('inspector-overlay').classList.remove('hidden');
+            document.getElementById('inspector-drawer').classList.remove('translate-x-full');
+            
+            // Fetch session list for dropdown
+            fetchSessionsList();
+            // Fetch immediate data
+            fetchInspectorData(true);
+        }
+
+        function closeInspector() {
+            inspectorOpenBot = null;
+            document.getElementById('inspector-overlay').classList.add('hidden');
+            document.getElementById('inspector-drawer').classList.add('translate-x-full');
+        }
+
+        async function fetchSessionsList() {
+            try {
+                const res = await fetch('/api/sessions');
+                const sessions = await res.json();
+                const select = document.getElementById('inspector-session-select');
+                const currentVal = select.value;
+                
+                select.innerHTML = '<option value="">Latest Session</option>';
+                sessions.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.innerText = `Session #${s.id} (${s.status})`;
+                    select.appendChild(opt);
+                });
+                
+                if (currentVal) {
+                    select.value = currentVal;
+                }
+            } catch (err) {
+                console.error("Failed to fetch sessions:", err);
+            }
+        }
+
+        function getSafeVal(arr, index) {
+            if (!arr || arr.length <= index) return null;
+            return arr[index];
+        }
+
+        async function fetchInspectorData(force = false) {
+            if (!inspectorOpenBot) return;
+            if (!force && !inspectorAutoRefresh) return;
+
+            const sessionSelect = document.getElementById('inspector-session-select').value;
+            let url = `/api/lpde/bot/${inspectorOpenBot}`;
+            if (sessionSelect) {
+                url += `?session_id=${sessionSelect}`;
+            }
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+
+                // Update Header
+                document.getElementById('inspector-phase').innerText = `Phase: ${data.phase || 'Unknown'}`;
+                document.getElementById('inspector-persona').innerText = data.legacy_state.persona || 'None';
+                document.getElementById('inspector-directive').innerText = data.legacy_state.current_directive || 'None';
+                
+                // Update Raw JSON
+                document.getElementById('inspector-raw-json').innerText = JSON.stringify(data.lpde_tensors, null, 2);
+
+                const activeDims = data.active_dims || [];
+                const isAffectActive = activeDims.includes('affect');
+                const isOpinionActive = activeDims.includes('opinion');
+                const isPowerActive = activeDims.includes('power');
+
+                // Update Vector Summary Chips
+                // Assume affect_json: [valence, arousal], opinion_json: [stance, moral_salience], power_json: [self_appraisal, systemic_influence]
+                const t = data.lpde_tensors;
+                const d = data.deltas;
+
+                function buildChip(label, valArr, deltaArr, index, isActive) {
+                    const val = getSafeVal(valArr, index);
+                    const delta = getSafeVal(deltaArr, index);
+                    
+                    if (!isActive || val === null || val === undefined) {
+                        return `
+                        <div class="bg-gray-100 p-2 rounded border border-gray-200 opacity-60">
+                            <div class="text-[10px] text-gray-500 font-bold uppercase">${label}</div>
+                            <div class="text-sm font-bold text-gray-400 mt-1 flex justify-between items-center">
+                                N/A <span class="text-[10px] bg-gray-200 px-1 rounded">Inactive</span>
+                            </div>
+                        </div>`;
+                    }
+                    
+                    const deltaColor = delta > 0 ? 'text-green-600' : (delta < 0 ? 'text-red-600' : 'text-gray-400');
+                    const deltaSign = delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '');
+                    const deltaText = delta !== 0 ? `${deltaSign}${delta}` : '-';
+
+                    return `
+                    <div class="bg-white p-2 rounded border border-gray-200 shadow-sm">
+                        <div class="text-[10px] text-gray-500 font-bold uppercase">${label}</div>
+                        <div class="text-sm font-bold text-gray-900 mt-1 flex justify-between items-center">
+                            ${val.toFixed(2)}
+                            <span class="text-[10px] font-bold ${deltaColor}">${deltaText}</span>
+                        </div>
+                    </div>`;
+                }
+
+                const chipsHtml = `
+                    ${buildChip('Valence', t.affect, d.affect, 0, isAffectActive)}
+                    ${buildChip('Arousal', t.affect, d.affect, 1, isAffectActive)}
+                    ${buildChip('Stance', t.opinion, d.opinion, 0, isOpinionActive)}
+                    ${buildChip('Moral Salience', t.opinion, d.opinion, 1, isOpinionActive)}
+                    ${buildChip('Self Appraisal', t.power, d.power, 0, isPowerActive)}
+                    ${buildChip('Sys. Influence', t.power, d.power, 1, isPowerActive)}
+                `;
+                document.getElementById('inspector-summary-chips').innerHTML = chipsHtml;
+
+                // Update Radar Chart
+                // Assuming standard indices for mapping
+                const rValence = getSafeVal(t.affect, 0) || 0;
+                const rArousal = getSafeVal(t.affect, 1) || 0;
+                const rStance = getSafeVal(t.opinion, 0) || 0;
+                const rMoral = getSafeVal(t.opinion, 1) || 0;
+                const rSelf = getSafeVal(t.power, 0) || 0;
+                const rSys = getSafeVal(t.power, 1) || 0;
+
+                const radarData = [rValence, rArousal, rStance, rMoral, rSelf, rSys];
+                // Inactive styling trick: If we want true dashed styling per axis, Chart.js radar doesn't support dashed *grid lines* easily per axis, 
+                // but we can just show the data. 
+
+                if (!radarChartInstance) {
+                    const ctxR = document.getElementById('radarChart').getContext('2d');
+                    radarChartInstance = new Chart(ctxR, {
+                        type: 'radar',
+                        data: {
+                            labels: ['Valence', 'Arousal', 'Stance', 'Moral Sal.', 'Self Appr.', 'Sys. Infl.'],
+                            datasets: [{
+                                label: 'Current State',
+                                data: radarData,
+                                backgroundColor: 'rgba(99, 102, 241, 0.2)',
+                                borderColor: 'rgba(99, 102, 241, 1)',
+                                pointBackgroundColor: 'rgba(99, 102, 241, 1)',
+                                pointBorderColor: '#fff',
+                                pointHoverBackgroundColor: '#fff',
+                                pointHoverBorderColor: 'rgba(99, 102, 241, 1)'
+                            }]
+                        },
+                        options: {
+                            scales: {
+                                r: {
+                                    min: -1,
+                                    max: 1,
+                                    ticks: { stepSize: 0.5, display: false }
+                                }
+                            },
+                            plugins: { legend: { display: false } }
+                        }
+                    });
+                } else {
+                    radarChartInstance.data.datasets[0].data = radarData;
+                    radarChartInstance.update();
+                }
+
+                // Update Line Chart (Time Series)
+                const labels = data.time_series.map(s => `T${s.turn_index}`);
+                const arousalData = data.time_series.map(s => getSafeVal(s.affect, 1) || 0);
+                const stanceData = data.time_series.map(s => getSafeVal(s.opinion, 0) || 0);
+                // Also can plot anger if available, but let's stick to LPDE tensors for now.
+
+                if (!lineChartInstance) {
+                    const ctxL = document.getElementById('lineChart').getContext('2d');
+                    lineChartInstance = new Chart(ctxL, {
+                        type: 'line',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                {
+                                    label: 'Arousal',
+                                    data: arousalData,
+                                    borderColor: 'rgb(239, 68, 68)',
+                                    tension: 0.3,
+                                    borderWidth: 2,
+                                    pointRadius: 2
+                                },
+                                {
+                                    label: 'Stance',
+                                    data: stanceData,
+                                    borderColor: 'rgb(59, 130, 246)',
+                                    tension: 0.3,
+                                    borderWidth: 2,
+                                    pointRadius: 2
+                                }
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            scales: {
+                                y: { min: -1, max: 1 }
+                            },
+                            plugins: {
+                                legend: { position: 'top', labels: { boxWidth: 10, font: { size: 10 } } }
+                            }
+                        }
+                    });
+                } else {
+                    lineChartInstance.data.labels = labels;
+                    lineChartInstance.data.datasets[0].data = arousalData;
+                    lineChartInstance.data.datasets[1].data = stanceData;
+                    lineChartInstance.update();
+                }
+
+                // Update Interventions
+                const intContainer = document.getElementById('inspector-interventions');
+                if (!data.interventions || data.interventions.length === 0) {
+                    intContainer.innerHTML = '<div class="text-gray-400 italic text-center py-2">No recent interventions</div>';
+                } else {
+                    let intHtml = '';
+                    data.interventions.forEach(inv => {
+                        intHtml += `
+                        <div class="bg-gray-50 p-2 rounded border border-gray-200">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="font-bold text-indigo-700">Turn ${inv.turn_index}</span>
+                                <span class="text-[10px] bg-red-100 text-red-700 px-1 rounded uppercase">${inv.kind}</span>
+                            </div>
+                            <div class="text-gray-700 mb-1 leading-tight">${inv.reason || 'No reason specified'}</div>
+                            <div class="text-[10px] text-gray-500 font-mono bg-gray-100 p-1 rounded">Delta: ${JSON.stringify(inv.delta)}</div>
+                        </div>`;
+                    });
+                    intContainer.innerHTML = intHtml;
+                }
+
+            } catch (err) {
+                console.error("Inspector data fetch error:", err);
+            }
         }
 
         // --- Initialization and Polling ---
@@ -378,6 +683,7 @@
         setInterval(fetchBotStates, 2000);
         setInterval(fetchPostList, 5000);
         setInterval(fetchPostDetail, 2000);
+        setInterval(() => fetchInspectorData(false), 2500); // Inspector Polling
 
     </script>
 </body>

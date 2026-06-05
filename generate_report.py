@@ -53,10 +53,27 @@ def generate_report():
     
     # Gather python files
     files_to_read = [
-        "docker-compose.yml",
+        "docker/docker-compose.yml",
         "run.py",
         "cli.py",
     ]
+    
+    # DB Schema 추가
+    md.append("### Database Schema\n")
+    md.append("```sql\n")
+    try:
+        import sqlite3
+        conn = sqlite3.connect("./ameva_society.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        for t in tables:
+            if t[0]:
+                md.append(t[0] + ";\n\n")
+        conn.close()
+    except Exception as e:
+        md.append(f"-- Error fetching schema: {e}\n")
+    md.append("```\n\n")
     
     # find all src/**/*.py
     for root, _, files in os.walk("src"):
