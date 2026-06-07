@@ -307,7 +307,7 @@ async def get_bot_inspector_detail(
             "memory": safe_load(current_state.memory_json),
             "opinion": safe_load(current_state.opinion_json),
             "power": safe_load(current_state.power_json),
-            "residual": safe_load(current_state.residual_json)
+            "event_data": safe_load(current_state.event_data_json)
         }
 
     # Time series (reverse order so oldest first)
@@ -326,7 +326,7 @@ async def get_bot_inspector_detail(
             "power": safe_load(snap.power_json)
         })
         
-        event_data = safe_load_dict(snap.residual_json)
+        event_data = safe_load_dict(snap.event_data_json)
         if event_data and isinstance(event_data, dict) and event_data.get("events"):
             recent_events.append({
                 "turn_index": snap.turn_index,

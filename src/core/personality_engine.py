@@ -78,7 +78,8 @@ class PersonalityEngine:
                 memory_json=json.dumps([0.0] * 8),
                 opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]),  # [Stance, Gap, Moral, ...]
                 power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                residual_json=json.dumps([0.0] * 16)
+                residual_json=json.dumps([0.0] * 16),
+                event_data_json="{}"
             )
             db.add(state)
             db.flush()  # flush to get ID without committing
@@ -106,7 +107,8 @@ class PersonalityEngine:
                     memory_json=json.dumps([0.0] * 8),
                     opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
                     power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                    residual_json=json.dumps([0.0] * 16)
+                    residual_json=json.dumps([0.0] * 16),
+                    event_data_json="{}"
                 )
                 db.add(state)
         db.flush()
@@ -384,13 +386,14 @@ class PersonalityEngine:
 
     def _snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState, event_data: Optional[dict] = None):
         """Record a turn-level snapshot. Does NOT commit — caller commits."""
-        # Stuff event_data into residual_json to avoid schema changes
-        residual = agent.residual_json
+        event_str = "{}"
         if event_data:
             try:
-                residual = json.dumps(event_data, ensure_ascii=False)
+                event_str = json.dumps(event_data, ensure_ascii=False)
             except Exception:
                 pass
+
+        agent.event_data_json = event_str
 
         snap = AgentStateSnapshot(
             session_id=session_id,
@@ -402,7 +405,8 @@ class PersonalityEngine:
             memory_json=agent.memory_json,
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
-            residual_json=residual
+            residual_json=agent.residual_json,
+            event_data_json=event_str
         )
         db.add(snap)
         # NO db.commit() here — batched in update_fast_state()

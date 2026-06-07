@@ -557,7 +557,7 @@ async def get_bot_inspector_detail(
             "memory": safe_load(current_state.memory_json),
             "opinion": safe_load(current_state.opinion_json),
             "power": safe_load(current_state.power_json),
-            "residual": safe_load(current_state.residual_json)
+            "event_data": safe_load(current_state.event_data_json)
         }
 
     # Time series (reverse order so oldest first)
@@ -576,7 +576,7 @@ async def get_bot_inspector_detail(
             "power": safe_load(snap.power_json)
         })
         
-        event_data = safe_load_dict(snap.residual_json)
+        event_data = safe_load_dict(snap.event_data_json)
         if event_data and isinstance(event_data, dict) and event_data.get("events"):
             recent_events.append({
                 "turn_index": snap.turn_index,
@@ -1574,7 +1574,8 @@ class PersonalityEngine:
                 memory_json=json.dumps([0.0] * 8),
                 opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]),  # [Stance, Gap, Moral, ...]
                 power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                residual_json=json.dumps([0.0] * 16)
+                residual_json=json.dumps([0.0] * 16),
+                event_data_json="{}"
             )
             db.add(state)
             db.flush()  # flush to get ID without committing
@@ -1602,7 +1603,8 @@ class PersonalityEngine:
                     memory_json=json.dumps([0.0] * 8),
                     opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
                     power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                    residual_json=json.dumps([0.0] * 16)
+                    residual_json=json.dumps([0.0] * 16),
+                    event_data_json="{}"
                 )
                 db.add(state)
         db.flush()
@@ -1880,13 +1882,14 @@ class PersonalityEngine:
 
     def _snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState, event_data: Optional[dict] = None):
         """Record a turn-level snapshot. Does NOT commit — caller commits."""
-        # Stuff event_data into residual_json to avoid schema changes
-        residual = agent.residual_json
+        event_str = "{}"
         if event_data:
             try:
-                residual = json.dumps(event_data, ensure_ascii=False)
+                event_str = json.dumps(event_data, ensure_ascii=False)
             except Exception:
                 pass
+
+        agent.event_data_json = event_str
 
         snap = AgentStateSnapshot(
             session_id=session_id,
@@ -1898,7 +1901,8 @@ class PersonalityEngine:
             memory_json=agent.memory_json,
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
-            residual_json=residual
+            residual_json=agent.residual_json,
+            event_data_json=event_str
         )
         db.add(snap)
         # NO db.commit() here — batched in update_fast_state()
@@ -2374,7 +2378,8 @@ class CurrentAgentState(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
+    residual_json = Column(Text, default="[]") 
+    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AgentStateSnapshot(Base):
@@ -2390,7 +2395,8 @@ class AgentStateSnapshot(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
+    residual_json = Column(Text, default="[]")
+    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
     created_at = Column(DateTime, default=datetime.now)
 
 class EdgeState(Base):
@@ -2465,102 +2471,11 @@ def calculate_effective_anger(anger_dict: dict) -> float:
     return math.sqrt(sum_sq)
 
 
-def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: float) -> str:
-    """Compressed tag-based emotion prompt for 1.8B models"""
-    try:
-        if not isinstance(anger_targets, dict):
-            anger_targets = {}
-
-        safe_targets = {}
-        for k, v in anger_targets.items():
-            try:
-                if not isinstance(k, str) or not k.strip():
-                    continue
-                num_val = float(v)
-                if num_val < 0:
-                    num_val = 0.0
-                safe_targets[k] = num_val
-            except Exception:
-                continue
-
-        try:
-            effective_anger = float(effective_anger)
-            if effective_anger < 0:
-                effective_anger = 0.0
-        except Exception:
-            effective_anger = 0.0
-
-        sorted_targets = sorted(
-            safe_targets.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:2]
-        
-        target_str = ",".join([f"{k}:{v:.0f}" for k, v in sorted_targets])
-        if not target_str:
-            target_str = "None"
-            
-        if effective_anger < 30:
-            state = "CALM"
-        elif effective_anger < 70:
-            state = "IRRITATED"
-        else:
-            state = "ENRAGED"
-
-        return f"[SYS_STATE: {bot_name}|ANG:{effective_anger:.0f}({state})|TGT:{target_str}]"
-
-    except Exception as e:
-        logger.warning(f"[EMOTION PROMPT WARNING] Failed to build emotion prompt for {bot_name}: {e}")
-        return f"[SYS_STATE: {bot_name}|CALM]"
 
 
-async def generate_director_directive(db, current_bot: str, recent_history: str, eff_anger: float) -> str:
-    """
-    Disabled God LLM call by default to save resources, 
-    returns a short static directive instead.
-    """
-    directive = "Point out a specific flaw in the opponent's logic."
-    
-    try:
-        bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
-        if bot_state:
-            bot_state.current_directive = directive
-            db.commit()
-    except Exception as e:
-        logger.warning(f"[DB WARNING] Could not update directive for {current_bot}: {e}")
-        
-    return directive
 
-
-def get_or_create_bot_state(db, current_bot):
-    bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
-
-    if not bot_state:
-        logger.warning(f"[TURN WARNING] BotState not found for {current_bot}. Creating fallback state.")
-        bot_state = BotState(bot_name=current_bot, anger_targets="{}")
-        db.add(bot_state)
-        db.commit()
-        db.refresh(bot_state)
-
-    return bot_state
-
-
-async def build_turn_context(db, post, current_bot, use_structured=False) -> Tuple[Dict, float, str, str]:
-    bot_state = get_or_create_bot_state(db, current_bot)
-
-    anger_dict = safe_json_loads(bot_state.anger_targets, {})
-    if not isinstance(anger_dict, dict):
-        anger_dict = {}
-
-    safe_anger_dict = {}
-    for k, v in anger_dict.items():
-        try:
-            safe_anger_dict[k] = float(v)
-        except Exception:
-            continue
-
-    eff_anger = calculate_effective_anger(safe_anger_dict)
-    emotion_directive = build_emotion_prompt(current_bot, safe_anger_dict, eff_anger)
+async def build_turn_context(db, post, current_bot, use_structured=False) -> str:
+    # 1A legacy features removed: safe_anger_dict, eff_anger, emotion_directive
 
     from src.orchestration.sanitizer import sanitize_generated_reply
 
@@ -2596,7 +2511,7 @@ async def build_turn_context(db, post, current_bot, use_structured=False) -> Tup
     if len(recent_history) > 600:
         recent_history = recent_history[-600:]
 
-    return safe_anger_dict, eff_anger, emotion_directive, recent_history
+    return recent_history
 
 ```
 
@@ -2626,8 +2541,7 @@ from src.core.event_extractor import extract_events
 from src.core.personality_engine import personality_engine
 from src.orchestration.sanitizer import sanitize_generated_reply, force_single_mention, enforce_fallback
 from src.orchestration.context_builder import (
-    safe_json_loads, calculate_effective_anger, build_emotion_prompt,
-    generate_director_directive, get_or_create_bot_state, build_turn_context
+    safe_json_loads, calculate_effective_anger, build_turn_context
 )
 
 from src.core.prompt_adapter import prompt_adapter
@@ -3503,53 +3417,7 @@ async def create_initial_stances(db, post):
     return stances, last_comment, last_speaker
 
 
-    anger_dict = safe_json_loads(bot_state.anger_targets, {})
-    if not isinstance(anger_dict, dict):
-        anger_dict = {}
 
-    safe_anger_dict = {}
-    for k, v in anger_dict.items():
-        try:
-            safe_anger_dict[k] = float(v)
-        except Exception:
-            continue
-
-    eff_anger = calculate_effective_anger(safe_anger_dict)
-    emotion_directive = build_emotion_prompt(current_bot, safe_anger_dict, eff_anger)
-
-    recent_c = (
-        db.query(Comment)
-        .filter(Comment.post_id == post.id)
-        .order_by(Comment.id.desc())
-        .limit(3)
-        .all()
-    )
-
-    async def _format_recent_history(items):
-        valid_items = []
-        for item in reversed(items):
-            if not item or not item.content:
-                continue
-            msg = sanitize_generated_reply(item.content)
-            if not msg:
-                continue
-            valid_items.append({"bot_name": item.bot_name, "message": msg})
-
-        if use_structured:
-            from src.core.prompt_adapter import prompt_adapter
-            return await prompt_adapter.build_structured_history(valid_items)
-        else:
-            lines = []
-            for item in valid_items:
-                lines.append(f"{item['bot_name']}: {item['message']}")
-            return "\n".join(lines).strip()
-
-    recent_history = await _format_recent_history(recent_c)
-
-    if len(recent_history) > 600:
-        recent_history = recent_history[-600:]
-
-    return safe_anger_dict, eff_anger, emotion_directive, recent_history
 
 
 async def generate_relay_reply(
@@ -3591,11 +3459,13 @@ async def generate_relay_reply(
         db, post.session_id, current_bot, turn_index=turn_idx, event_data=event_data
     )
 
-    # Build turn context (anger dict, emotion directive, recent history)
-    safe_anger_dict, eff_anger, emotion_directive, recent_history = await build_turn_context(
+    # Build turn context (recent history only)
+    recent_history = await build_turn_context(
         db, post, current_bot, use_structured=LPDE_STRUCTURED_HISTORY
     )
-    god_directive = await generate_director_directive(db, current_bot, recent_history, eff_anger)
+    
+    # Phase 2A: Director hint is now a static helper for 1.8B models
+    god_directive = "Point out a specific flaw in the opponent's logic."
 
     # --- Phase 2B: Intervention (default OFF) ---
     if LPDE_INTERVENTION_ENABLED:
@@ -3607,7 +3477,13 @@ async def generate_relay_reply(
                 db, post.session_id, current_bot
             )
             arousal_val = lpde_state.get("affect", [0.0, 0.0])[1]
-            tension_val = personality_engine.get_edges_for_bot(db, post.session_id, current_bot).get('tension', 0.0)
+            
+            edges = personality_engine.get_edges_for_bot(db, post.session_id, current_bot)
+            target = event_data.get("target") if event_data else None
+            if target and target in edges:
+                tension_val = edges[target].get("tension", 0.0)
+            else:
+                tension_val = max([v.get("tension", 0.0) for v in edges.values()]) if edges else 0.0
 
             # Intervention trigger conditions:
             # Every 3 turns OR arousal > 0.7

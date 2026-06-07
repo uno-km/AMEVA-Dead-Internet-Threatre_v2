@@ -22,8 +22,7 @@ from src.core.event_extractor import extract_events
 from src.core.personality_engine import personality_engine
 from src.orchestration.sanitizer import sanitize_generated_reply, force_single_mention, enforce_fallback
 from src.orchestration.context_builder import (
-    safe_json_loads, calculate_effective_anger, build_emotion_prompt,
-    generate_director_directive, get_or_create_bot_state, build_turn_context
+    safe_json_loads, calculate_effective_anger, build_turn_context
 )
 
 from src.core.prompt_adapter import prompt_adapter
@@ -899,53 +898,7 @@ async def create_initial_stances(db, post):
     return stances, last_comment, last_speaker
 
 
-    anger_dict = safe_json_loads(bot_state.anger_targets, {})
-    if not isinstance(anger_dict, dict):
-        anger_dict = {}
 
-    safe_anger_dict = {}
-    for k, v in anger_dict.items():
-        try:
-            safe_anger_dict[k] = float(v)
-        except Exception:
-            continue
-
-    eff_anger = calculate_effective_anger(safe_anger_dict)
-    emotion_directive = build_emotion_prompt(current_bot, safe_anger_dict, eff_anger)
-
-    recent_c = (
-        db.query(Comment)
-        .filter(Comment.post_id == post.id)
-        .order_by(Comment.id.desc())
-        .limit(3)
-        .all()
-    )
-
-    async def _format_recent_history(items):
-        valid_items = []
-        for item in reversed(items):
-            if not item or not item.content:
-                continue
-            msg = sanitize_generated_reply(item.content)
-            if not msg:
-                continue
-            valid_items.append({"bot_name": item.bot_name, "message": msg})
-
-        if use_structured:
-            from src.core.prompt_adapter import prompt_adapter
-            return await prompt_adapter.build_structured_history(valid_items)
-        else:
-            lines = []
-            for item in valid_items:
-                lines.append(f"{item['bot_name']}: {item['message']}")
-            return "\n".join(lines).strip()
-
-    recent_history = await _format_recent_history(recent_c)
-
-    if len(recent_history) > 600:
-        recent_history = recent_history[-600:]
-
-    return safe_anger_dict, eff_anger, emotion_directive, recent_history
 
 
 async def generate_relay_reply(
@@ -987,11 +940,13 @@ async def generate_relay_reply(
         db, post.session_id, current_bot, turn_index=turn_idx, event_data=event_data
     )
 
-    # Build turn context (anger dict, emotion directive, recent history)
-    safe_anger_dict, eff_anger, emotion_directive, recent_history = await build_turn_context(
+    # Build turn context (recent history only)
+    recent_history = await build_turn_context(
         db, post, current_bot, use_structured=LPDE_STRUCTURED_HISTORY
     )
-    god_directive = await generate_director_directive(db, current_bot, recent_history, eff_anger)
+    
+    # Phase 2A: Director hint is now a static helper for 1.8B models
+    god_directive = "Point out a specific flaw in the opponent's logic."
 
     # --- Phase 2B: Intervention (default OFF) ---
     if LPDE_INTERVENTION_ENABLED:
@@ -1003,7 +958,13 @@ async def generate_relay_reply(
                 db, post.session_id, current_bot
             )
             arousal_val = lpde_state.get("affect", [0.0, 0.0])[1]
-            tension_val = personality_engine.get_edges_for_bot(db, post.session_id, current_bot).get('tension', 0.0)
+            
+            edges = personality_engine.get_edges_for_bot(db, post.session_id, current_bot)
+            target = event_data.get("target") if event_data else None
+            if target and target in edges:
+                tension_val = edges[target].get("tension", 0.0)
+            else:
+                tension_val = max([v.get("tension", 0.0) for v in edges.values()]) if edges else 0.0
 
             # Intervention trigger conditions:
             # Every 3 turns OR arousal > 0.7
