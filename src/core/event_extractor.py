@@ -32,14 +32,20 @@ _AGREE_KEYWORDS = [
     r"\bwell said\b", r"\bthat'?s true\b", r"\babsolutely\b", r"\bcorrect\b",
     r"\bfair point\b", r"\byou make a good\b", r"\bi support\b",
     r"\bi concur\b", r"\bspot on\b", r"\bthat'?s fair\b",
+    r"\bi agree with you\b", r"\bmakes sense\b", r"\bi can see that\b",
+    r"\bvalid point\b", r"\bso true\b", r"\bi am with you\b", r"\b100%\b",
+    r"\byeah\b", r"\byes\b", r"\bof course\b", r"\bindeed\b"
 ]
 
 _DISAGREE_KEYWORDS = [
     r"\bi disagree\b", r"\bthat'?s wrong\b", r"\bnonsense\b", r"\bridiculous\b",
     r"\bthat'?s not true\b", r"\byou'?re wrong\b", r"\babsurd\b",
     r"\bmisguided\b", r"\bflawed\b", r"\bmisleading\b", r"\bfalse\b",
-    r"\binaccurate\b", r"\bcompletely wrong\b", r"\bmake no sense\b",
+    r"\bcompletely wrong\b", r"\bmake no sense\b",
     r"\bthat doesn'?t hold\b", r"\bthat'?s a stretch\b",
+    r"\bi don'?t think so\b", r"\byou are missing\b", r"\bbullshit\b",
+    r"\bthat'?s false\b", r"\byou'?re ignoring\b", r"\bnot exactly\b",
+    r"\bhard to believe\b", r"\bno way\b", r"\bdisagree with\b", r"\bwrong about\b"
 ]
 
 _ATTACK_KEYWORDS = [
@@ -56,13 +62,17 @@ _QUESTION_KEYWORDS = [
     r"\bwhy do you\b", r"\bhow do you\b", r"\bwhat evidence\b",
     r"\bcan you show\b", r"\bback.{0,5}up\b", r"\bjustif\w*\b",
     r"\bwhat makes you\b", r"\bwhere'?s your\b",
+    r"\bwhat about\b", r"\bcare to explain\b", r"\bdo you really\b",
+    r"\bare you sure\b", r"\bhow can you\b", r"\bwhere is the\b",
+    r"\bwhat if\b"
 ]
 
 _CONCEDE_KEYWORDS = [
     r"\bi admit\b", r"\bfair enough\b", r"\byou have a point\b",
     r"\bi was wrong\b", r"\bi'?ll give you that\b", r"\bpartially agree\b",
     r"\bi see your point\b", r"\bthat'?s a valid\b", r"\bi concede\b",
-    r"\bi acknowledge\b", r"\bi stand corrected\b",
+    r"\bi acknowledge\b", r"\bi stand corrected\b", r"\bi guess you'?re right\b",
+    r"\bperhaps you'?re right\b", r"\bmaybe you'?re right\b", r"\bthat might be true\b"
 ]
 
 
@@ -76,9 +86,8 @@ def _match_any(text: str, patterns: list[str]) -> bool:
 
 def _extract_mention_target(text: str, speaker: str, all_bots: list[str]) -> Optional[str]:
     """Extract the @mention target bot, excluding self-mentions."""
-    matches = re.findall(r'@(bot_\[?[123]\]?)', text, re.IGNORECASE)
-    # Normalize: remove brackets
-    normalized = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
+    matches = re.findall(r'@(bot_[123])\b', text, re.IGNORECASE)
+    normalized = [m.lower() for m in matches]
     # Exclude self-mentions
     others = [m for m in normalized if m != speaker and m in all_bots]
     return others[-1] if others else None
@@ -182,7 +191,11 @@ def extract_events(
     if not mention_target and not any(
         e in events for e in ["AGREE", "DISAGREE", "ATTACK", "QUESTION", "CONCEDE"]
     ):
-        events.append("IGNORE")
+        if len(text) < 40:
+            events.append("IGNORE")
+        else:
+            # Fallback to mild disagreement if engaged but lacking keywords
+            events.append("DISAGREE")
 
     # 4. Target inference priority:
     #    @bot_x > last commenter > None

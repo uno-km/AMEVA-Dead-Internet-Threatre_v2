@@ -116,7 +116,13 @@ class TestSanitization(unittest.TestCase):
             "That seems to miss the core point. Can you explain further?",
             "The argument is getting a bit muddy. What is your actual stance?",
             "You need to provide clearer evidence for that claim.",
-            "There seems to be a missing piece in your reasoning right now."
+            "There seems to be a missing piece in your reasoning right now.",
+            "Are you deliberately ignoring the obvious implications?",
+            "I strongly disagree with that logic. Could you try explaining it another way?",
+            "This isn't convincing at all. Provide a better rationale.",
+            "You're repeating the same weak point. Can we move on?",
+            "Let's refocus the discussion. What exactly are you trying to prove?",
+            "Your argument lacks substance. Do you have any real facts to support it?"
         ]
         matched = False
         for exp in expected_patterns:

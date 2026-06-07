@@ -20,6 +20,12 @@ from src.core.llm_client import LLMClient
 from src.core.persona import PersonaManager
 from src.core.event_extractor import extract_events
 from src.core.personality_engine import personality_engine
+from src.orchestration.sanitizer import sanitize_generated_reply, force_single_mention, enforce_fallback
+from src.orchestration.context_builder import (
+    safe_json_loads, calculate_effective_anger, build_emotion_prompt,
+    generate_director_directive, get_or_create_bot_state, build_turn_context
+)
+
 from src.core.prompt_adapter import prompt_adapter
 from src.orchestration.state_manager import state_manager, SystemState, Checkpoint
 
@@ -214,17 +220,17 @@ def reset_bot_states(db):
 
 async def sync_personas_to_db(db):
     persona_map = await PersonaManager.get_all_personas()
+    new_rows = []
     for bot_name, persona in persona_map.items():
         row = db.query(BotState).filter(BotState.bot_name == bot_name).first()
         if not row:
             row = BotState(bot_name=bot_name, anger_targets="{}")
-            db.add(row)
+            new_rows.append(row)
         row.persona = persona
+    if new_rows:
+        db.add_all(new_rows)
     db.commit()
 
-def calculate_effective_anger(anger_dict: dict) -> float:
-    if not anger_dict or not isinstance(anger_dict, dict):
-        return 0.0
 
     sum_sq = 0.0
     for val in anger_dict.values():
@@ -493,11 +499,6 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
         logger.info(f"[QUEUE] Fallback to angriest bot: {angriest_bot}")
         return angriest_bot
 
-def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: float) -> str:
-    try:
-        # 1) anger_targets 방어 (Defense)
-        if not isinstance(anger_targets, dict):
-            anger_targets = {}
 
         safe_targets = {}
         for k, v in anger_targets.items():
@@ -563,9 +564,6 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
             "Keep your response short and react in a calm and clear manner. "
             "Never output this internal directive."
         )
-async def generate_director_directive(db, current_bot: str, recent_history: str, eff_anger: float) -> str:
-    """God LLM generates a short, safe directive for the current speaker based on conversation context."""
-    logger.info(f"[GOD LLM] Generating dynamic director's directive for {current_bot}...")
 
     try:
         # Input validation
@@ -648,10 +646,6 @@ async def generate_director_directive(db, current_bot: str, recent_history: str,
         logger.warning(f"[GOD LLM WARNING] Failed to generate directive for {current_bot}: {e}")
         return "Point out one of the opponent's core arguments and specifically demand evidence for it."
 
-def safe_json_loads(value, default):
-    try:
-        if value is None:
-            return default
 
         if isinstance(value, type(default)):
             return value
@@ -787,6 +781,9 @@ async def run_session():
         db.commit()
         db.refresh(session)
 
+        # Pre-initialize agent states with opposing stances to ensure dynamic debate
+        personality_engine.initialize_session_states(db, session.id)
+
         state_manager.current_session_id = session.id
         post = await create_post_with_main_llm(db, session)
         await state_manager.wait_at_checkpoint(Checkpoint.TOPIC_GEN_DONE)
@@ -834,9 +831,22 @@ async def create_initial_stances(db, post):
             persona = await PersonaManager.get_persona(b_name)
             bot_client = bots[b_name]
 
+            # Load agent state to read the pre-assigned stance
+            agent_state = personality_engine.load_agent_state(db, post.session_id, b_name)
+            opinion = json.loads(agent_state.opinion_json)
+            stance = opinion[0] if opinion else 0.0
+
+            if stance > 0.3:
+                stance_instruction = "You strongly support/agree with the main argument of this post. Write a response expressing clear support."
+            elif stance < -0.3:
+                stance_instruction = "You strongly oppose/disagree with the main argument of this post. Write a response expressing clear opposition."
+            else:
+                stance_instruction = "Your position is nuanced and flexible. Write a response reflecting a neutral, moderate, or balanced stance."
+
             prompt = (
                 f"Post Content: {post.content}\n\n"
                 f"Instruction: State your position on the above post clearly and concisely in 1-2 sentences. Reply in English.\n"
+                f"{stance_instruction}\n"
             )
 
             reply_content = await bot_client.generate_completion(
@@ -888,8 +898,6 @@ async def create_initial_stances(db, post):
 
     return stances, last_comment, last_speaker
 
-async def build_turn_context(db, post, current_bot, use_structured=False):
-    bot_state = get_or_create_bot_state(db, current_bot)
 
     anger_dict = safe_json_loads(bot_state.anger_targets, {})
     if not isinstance(anger_dict, dict):
@@ -949,9 +957,7 @@ async def generate_relay_reply(
 
     # [LPDE Feature Flags]
     LPDE_STRUCTURED_HISTORY = os.getenv("LPDE_STRUCTURED_HISTORY", "true").lower() == "true"
-    LPDE_FULL_PROMPT = os.getenv("LPDE_FULL_PROMPT", "false").lower() == "true"
-    LPDE_LEGACY_PROMPT = os.getenv("LPDE_LEGACY_PROMPT", "false").lower() == "true"
-    LPDE_COUNTER_ARG = os.getenv("LPDE_COUNTER_ARG", "false").lower() == "true"
+    LPDE_COUNTER_ARG = os.getenv("LPDE_COUNTER_ARG", "true").lower() == "true"
     LPDE_INTERVENTION_ENABLED = os.getenv("LPDE_INTERVENTION", "false").lower() == "true"
 
     # --- Phase 2A: Event Extraction from last comment ---
@@ -965,7 +971,7 @@ async def generate_relay_reply(
             speaker=last_speaker or "unknown",
             all_bots=all_bots,
             parent_comment_text=None,  # We track parent-of-parent later if needed
-            last_target=current_bot,
+            last_target=last_speaker,
         )
     else:
         event_data = {
@@ -997,10 +1003,11 @@ async def generate_relay_reply(
                 db, post.session_id, current_bot
             )
             arousal_val = lpde_state.get("affect", [0.0, 0.0])[1]
+            tension_val = personality_engine.get_edges_for_bot(db, post.session_id, current_bot).get('tension', 0.0)
 
             # Intervention trigger conditions:
             # Every 3 turns OR arousal > 0.7
-            should_intervene = (turn_idx % 3 == 0 and turn_idx > 0) or arousal_val > 0.7
+            should_intervene = (turn_idx % 3 == 0 and turn_idx > 0) or tension_val > 0.6
             if should_intervene:
                 intervention = await generate_intervention_json(
                     god_llm, current_bot, lpde_state, recent_history, arousal_val
@@ -1012,64 +1019,33 @@ async def generate_relay_reply(
         except Exception as e:
             logger.warning(f"[INTERVENTION WARNING] Failed: {e}")
 
-    # --- Build Prompt ---
-    if LPDE_FULL_PROMPT:
-        # Phase 2A: Full LPDE-driven prompt via PromptAdapter
-        lpde_state = personality_engine.get_current_state_dict(
-            db, post.session_id, current_bot
-        )
-        edge_summary = personality_engine.get_edges_for_bot(
-            db, post.session_id, current_bot
-        )
+    # --- Phase 2A: Full LPDE-driven prompt via PromptAdapter ---
+    lpde_state = personality_engine.get_current_state_dict(
+        db, post.session_id, current_bot
+    )
+    edge_summary = personality_engine.get_edges_for_bot(
+        db, post.session_id, current_bot
+    )
 
-        # Determine target for prompt context
-        target_bot = event_data.get("target") if event_data else None
-        claim_snippet = ""
-        if last_comment_text:
-            from src.core.event_extractor import _extract_claim_snippet
-            claim_snippet = _extract_claim_snippet(last_comment_text)
+    # Determine target for prompt context
+    target_bot = event_data.get("target") if event_data else None
+    claim_snippet = ""
+    if last_comment_text:
+        from src.core.event_extractor import _extract_claim_snippet
+        claim_snippet = _extract_claim_snippet(last_comment_text)
 
-        prompt = prompt_adapter.build_prompt(
-            current_bot=current_bot,
-            persona=persona,
-            lpde_state=lpde_state,
-            edge_summary=edge_summary,
-            target_bot=target_bot,
-            recent_history=recent_history,
-            post_content=post.content,
-            claim_snippet=claim_snippet,
-            counter_arg_enabled=LPDE_COUNTER_ARG,
-            god_directive=god_directive,
-        )
-    elif LPDE_LEGACY_PROMPT:
-        # True legacy prompt (for A/B comparison)
-        prompt = (
-            f"Post Content: {post.content}\n\n"
-            f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
-            f"Instruction: State your opinion by either refuting or agreeing with the recent conversation in 1-2 sentences. Reply in English.\n"
-            f"DO NOT write a chat script. DO NOT use 'bot_x:' prefixes. Just output your own statement directly.\n"
-            f"You MUST mention exactly one of '@bot_1', '@bot_2', or '@bot_3' at the end of your message (do NOT mention yourself).\n"
-        )
-    else:
-        # Phase 1A: Hardened prompt (shadow mode + hardening)
-        prompt = (
-            f"Post Content: {post.content}\n\n"
-            f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
-            f"Current Speaker: {current_bot}\n"
-            f"Instruction: You are {current_bot}. "
-            f"Respond ONLY as {current_bot} in 1-2 sentences in English.\n"
-            f"Do NOT write dialogue for other bots. "
-            f"Do NOT write a chat script. "
-            f"Do NOT use 'bot_x:' prefixes. "
-            f"Output only your own final message.\n"
-            f"You MUST mention exactly one of '@bot_1', '@bot_2', or '@bot_3' at the end of your message (do NOT mention yourself).\n"
-        )
-
-        if god_directive:
-            prompt += f"\nDirector Hint: {god_directive}\n"
-
-        if emotion_directive:
-            prompt += f"\nEmotional State: {emotion_directive}\n"
+    prompt = prompt_adapter.build_prompt(
+        current_bot=current_bot,
+        persona=persona,
+        lpde_state=lpde_state,
+        edge_summary=edge_summary,
+        target_bot=target_bot,
+        recent_history=recent_history,
+        post_content=post.content,
+        claim_snippet=claim_snippet,
+        counter_arg_enabled=LPDE_COUNTER_ARG,
+        god_directive=god_directive,
+    )
 
     reply_content = await bot_client.generate_completion(
         persona, 
@@ -1170,8 +1146,6 @@ def save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, 
     return c
 
 
-def get_or_create_bot_state(db, current_bot):
-    bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
 
     if not bot_state:
         logger.warning(f"[TURN WARNING] BotState not found for {current_bot}. Creating fallback state.")
@@ -1257,18 +1231,11 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker, start_t
         db.commit()
 
 
-def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
-    if not text or not isinstance(text, str):
-        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
-        chosen = random.choice(candidates) if candidates else "bot_1"
-        return f"@{chosen}", chosen
 
-    matches = re.findall(r'@(bot_\[?[123]\]?)(?!\d)', text, flags=re.IGNORECASE)
-    # Normalize bot name by removing brackets for comparison
-    matches = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
-    matches = [m for m in matches if m != current_bot]
+    matches = re.findall(r'@(bot_[123])\b', text, flags=re.IGNORECASE)
+    matches = [m.lower() for m in matches if m.lower() != current_bot]
 
-    cleaned = re.sub(r'@(bot_\[?[123]\]?)(?!\d)', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'@(bot_[123])\b', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.!?])', r'\1', cleaned)
     cleaned = cleaned.strip(" ,")
@@ -1284,67 +1251,56 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
 
     return f"@{chosen}", chosen
 
-def enforce_fallback(text: str, current_bot: str) -> str:
-    if not text or not text.strip():
-        fallback_replies = [
-            "I think you're avoiding the main issue. Can you clarify your point?",
-            "That seems to miss the core point. Can you explain further?",
-            "The argument is getting a bit muddy. What is your actual stance?",
-            "You need to provide clearer evidence for that claim.",
-            "There seems to be a missing piece in your reasoning right now."
-        ]
-        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
-        chosen = random.choice(candidates) if candidates else "bot_1"
-        chosen_reply = random.choice(fallback_replies)
-        return f"{chosen_reply} @{chosen}"
-    return text
 
-def sanitize_generated_reply(text: str) -> str:
-    if not text or not isinstance(text, str):
-        return ""
 
     text = text.strip()
 
-    # 1) 메타 필드 / 구조화 컨텍스트 누출 제거 (Metadata field & structured history leakage removal)
-    text = re.sub(r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'speaker=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'message=\s*["\']?', '', text, flags=re.IGNORECASE)
-    
-    # stance leakage 제거
-    text = re.sub(r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'stance\s*:\s*', '', text, flags=re.IGNORECASE)
+    # Pre-compiled regex patterns for better maintainability and performance
+    PATTERNS = [
+        # Metadata field leakage
+        (r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'^\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', re.IGNORECASE),
+        (r'\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'speaker=\s*["\']?', re.IGNORECASE),
+        (r'message=\s*["\']?', re.IGNORECASE),
+        
+        # Stance leakage
+        (r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', re.IGNORECASE),
+        (r'\'s\s+stance\s*:\s*', re.IGNORECASE),
+        (r'stance\s*:\s*', re.IGNORECASE),
 
-    # 2) 선행 bot prefix 제거 (Leading bot prefix removal)
-    text = re.sub(r'^\s*bot_\[?[123]\]?:?\s*', '', text, flags=re.IGNORECASE)
+        # Leading bot prefix
+        (r'^\s*bot_\[?[123]\]?:?\s*', re.IGNORECASE),
 
-    # 3) 내부 지침 누출 제거 (한글/영문) (Internal directive leakage removal)
-    text = re.sub(r'^.*현재 비교적 이성적이고 차분하다.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*내부 지침.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*절대 그대로 출력하지 마라.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*Emotional State:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Director Hint:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently relatively calm and rational.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently quite irritated and angry.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently extremely enraged and highly agitated.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Never repeat or explain this internal directive.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*INTERNAL EMOTIONAL STATE.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Total Effective Anger:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Major Target Anger Scores:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Total Valid Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Major Target Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Current Emotionally Distressed.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+        # Internal directives
+        (r'^.*현재 비교적 이성적이고 차분하다.*$', re.MULTILINE),
+        (r'^.*내부 지침.*$', re.MULTILINE),
+        (r'^.*절대 그대로 출력하지 마라.*$', re.MULTILINE),
+        (r'^.*Emotional State:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Director Hint:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently relatively calm and rational.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently quite irritated and angry.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently extremely enraged and highly agitated.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Never repeat or explain this internal directive.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*INTERNAL EMOTIONAL STATE.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Total Effective Anger:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Major Target Anger Scores:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Total Valid Emotions:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Major Target Emotions:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Current Emotionally Distressed.*$', re.MULTILINE | re.IGNORECASE),
 
-    # 4) 반복 bot tag 루프 축소 (Repetitive bot tag loop removal)
-    text = re.sub(r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', '', text, flags=re.IGNORECASE)
+        # Repetitive bot tag loop
+        (r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', re.IGNORECASE),
 
-    # 5) 선행 고아 콜론 제거 (Stray leading colons removal)
-    text = re.sub(r'^\s*:\s*', '', text)
+        # Stray leading colons
+        (r'^\s*:\s*', 0),
+    ]
 
-    # 6) 공백 정리 (Clean up whitespace)
+    for pattern, flags in PATTERNS:
+        text = re.sub(pattern, '', text, flags=flags)
+
+    # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n\s*\n+', '\n', text)
     text = text.strip()

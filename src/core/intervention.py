@@ -160,6 +160,8 @@ def apply_intervention(
     """
     Apply an intervention delta to the target bot's state.
     Logs to InterventionLog regardless of success.
+    NOTE: This function modifies the SQLAlchemy Session but does NOT call db.commit().
+    The caller is responsible for committing the transaction.
     Returns True if delta was applied.
     """
     target_bot = intervention.get("target_bot", "")

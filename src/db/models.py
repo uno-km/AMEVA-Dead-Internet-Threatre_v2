@@ -75,7 +75,7 @@ class CurrentAgentState(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]")
+    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AgentStateSnapshot(Base):
@@ -91,7 +91,7 @@ class AgentStateSnapshot(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]")
+    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
     created_at = Column(DateTime, default=datetime.now)
 
 class EdgeState(Base):

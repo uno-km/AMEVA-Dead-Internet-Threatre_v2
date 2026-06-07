@@ -84,6 +84,34 @@ class PersonalityEngine:
             db.flush()  # flush to get ID without committing
         return state
 
+    def initialize_session_states(self, db: Session, session_id: int):
+        """Pre-initialize agent states with opposing stances to ensure dynamic debate."""
+        bots = ["bot_1", "bot_2", "bot_3"]
+        # Randomly assign Pro (0.8), Con (-0.8), and Neutral/Nuanced (0.0)
+        stances = [0.8, -0.8, 0.0]
+        random.shuffle(stances)
+        
+        for i, bot_name in enumerate(bots):
+            state = db.query(CurrentAgentState).filter(
+                CurrentAgentState.session_id == session_id,
+                CurrentAgentState.bot_name == bot_name
+            ).first()
+            if not state:
+                state = CurrentAgentState(
+                    session_id=session_id,
+                    bot_name=bot_name,
+                    traits_json=json.dumps([0.0] * 22),
+                    states_json=json.dumps([0.0] * 10),
+                    affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
+                    memory_json=json.dumps([0.0] * 8),
+                    opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
+                    power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
+                    residual_json=json.dumps([0.0] * 16)
+                )
+                db.add(state)
+        db.flush()
+
+
     # =================================================================
     # Edge State Management (Directed Relationship Tensors)
     # =================================================================

@@ -17,9 +17,8 @@ services:
       - PORT=8050
       - DATABASE_URL=sqlite:////AMEVA-DeadInternetSociety/ameva_society.db
       - PYTHONPATH=/AMEVA-DeadInternetSociety
-      - LPDE_STRUCTURED_HISTORY=true
-      - LPDE_FULL_PROMPT=false
-      - LPDE_LEGACY_PROMPT=false
+      # NOTE: LPDE_FULL_PROMPT and LPDE_LEGACY_PROMPT flags are removed in Phase 2
+      # The system now always runs in Phase 2 with full LPDE prompt.
     depends_on:
       - llm-main
       - llm-bot-1
@@ -90,17 +89,17 @@ services:
       - ameva_net
     restart: no
 
-#  llm-police:
-#    image: ghcr.io/ggml-org/llama.cpp:server
-#    container_name: ameva-llm-police
-#    ports:
-#      - "8106:8080"
-#    volumes:
-#      - ../../models:/models
-#    command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
-#    networks:
-#      - ameva_net
-#    restart: no
+  #  llm-police:
+  #    image: ghcr.io/ggml-org/llama.cpp:server
+  #    container_name: ameva-llm-police
+  #    ports:
+  #      - "8106:8080"
+  #    volumes:
+  #      - ../../models:/models
+  #    command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
+  #    networks:
+  #      - ameva_net
+  #    restart: no
 
   dozzle:
     container_name: dozzle

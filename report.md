@@ -144,9 +144,8 @@ services:
       - PORT=8050
       - DATABASE_URL=sqlite:////AMEVA-DeadInternetSociety/ameva_society.db
       - PYTHONPATH=/AMEVA-DeadInternetSociety
-      - LPDE_STRUCTURED_HISTORY=true
-      - LPDE_FULL_PROMPT=false
-      - LPDE_LEGACY_PROMPT=false
+      # NOTE: LPDE_FULL_PROMPT and LPDE_LEGACY_PROMPT flags are removed in Phase 2
+      # The system now always runs in Phase 2 with full LPDE prompt.
     depends_on:
       - llm-main
       - llm-bot-1
@@ -217,17 +216,17 @@ services:
       - ameva_net
     restart: no
 
-#  llm-police:
-#    image: ghcr.io/ggml-org/llama.cpp:server
-#    container_name: ameva-llm-police
-#    ports:
-#      - "8106:8080"
-#    volumes:
-#      - ../../models:/models
-#    command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
-#    networks:
-#      - ameva_net
-#    restart: no
+  #  llm-police:
+  #    image: ghcr.io/ggml-org/llama.cpp:server
+  #    container_name: ameva-llm-police
+  #    ports:
+  #      - "8106:8080"
+  #    volumes:
+  #      - ../../models:/models
+  #    command: -m /models/llama3.2-1b.gguf -c 2048 --host 0.0.0.0 --port 8080
+  #    networks:
+  #      - ameva_net
+  #    restart: no
 
   dozzle:
     container_name: dozzle
@@ -449,7 +448,7 @@ async def get_bot_inspector_summary(
         AgentStateSnapshot.bot_name == bot_name
     ).order_by(AgentStateSnapshot.turn_index.desc()).limit(2).all()
     
-    deltas = {"affect": None, "opinion": None, "power": None}
+    deltas = {"affect": [], "opinion": [], "power": []}
     if len(snapshots) >= 2:
         latest_snap = snapshots[0]
         prev_snap = snapshots[1]
@@ -477,7 +476,7 @@ async def get_bot_inspector_summary(
         return {
             "bot_name": bot_name,
             "session_id": session_id,
-            "phase": "shadow_updater_1A",
+            "phase": "LPDE_Phase_2",
             "active_dims": ["affect", "opinion", "power"],
             "message": "No LPDE state yet for this session",
             "legacy_state": {
@@ -487,7 +486,8 @@ async def get_bot_inspector_summary(
                 "anger_targets": anger_dict
             },
             "lpde_tensors": {"affect": [], "opinion": [], "power": []},
-            "deltas": deltas
+            "relation_summary": {},
+            "deltas": {"affect": [], "opinion": [], "power": []}
         }
 
     lpde_tensors = {
@@ -504,7 +504,7 @@ async def get_bot_inspector_summary(
         "bot_name": bot_name,
         "session_id": session_id,
         "updated_at": current_state.updated_at.strftime("%Y-%m-%d %H:%M:%S") if current_state.updated_at else None,
-        "phase": "shadow_updater_1A",
+        "phase": "LPDE_Phase_2",
         "active_dims": ["affect", "opinion", "power"],
         "legacy_state": {
             "persona": persona,
@@ -849,14 +849,20 @@ _AGREE_KEYWORDS = [
     r"\bwell said\b", r"\bthat'?s true\b", r"\babsolutely\b", r"\bcorrect\b",
     r"\bfair point\b", r"\byou make a good\b", r"\bi support\b",
     r"\bi concur\b", r"\bspot on\b", r"\bthat'?s fair\b",
+    r"\bi agree with you\b", r"\bmakes sense\b", r"\bi can see that\b",
+    r"\bvalid point\b", r"\bso true\b", r"\bi am with you\b", r"\b100%\b",
+    r"\byeah\b", r"\byes\b", r"\bof course\b", r"\bindeed\b"
 ]
 
 _DISAGREE_KEYWORDS = [
     r"\bi disagree\b", r"\bthat'?s wrong\b", r"\bnonsense\b", r"\bridiculous\b",
     r"\bthat'?s not true\b", r"\byou'?re wrong\b", r"\babsurd\b",
     r"\bmisguided\b", r"\bflawed\b", r"\bmisleading\b", r"\bfalse\b",
-    r"\binaccurate\b", r"\bcompletely wrong\b", r"\bmake no sense\b",
+    r"\bcompletely wrong\b", r"\bmake no sense\b",
     r"\bthat doesn'?t hold\b", r"\bthat'?s a stretch\b",
+    r"\bi don'?t think so\b", r"\byou are missing\b", r"\bbullshit\b",
+    r"\bthat'?s false\b", r"\byou'?re ignoring\b", r"\bnot exactly\b",
+    r"\bhard to believe\b", r"\bno way\b", r"\bdisagree with\b", r"\bwrong about\b"
 ]
 
 _ATTACK_KEYWORDS = [
@@ -873,13 +879,17 @@ _QUESTION_KEYWORDS = [
     r"\bwhy do you\b", r"\bhow do you\b", r"\bwhat evidence\b",
     r"\bcan you show\b", r"\bback.{0,5}up\b", r"\bjustif\w*\b",
     r"\bwhat makes you\b", r"\bwhere'?s your\b",
+    r"\bwhat about\b", r"\bcare to explain\b", r"\bdo you really\b",
+    r"\bare you sure\b", r"\bhow can you\b", r"\bwhere is the\b",
+    r"\bwhat if\b"
 ]
 
 _CONCEDE_KEYWORDS = [
     r"\bi admit\b", r"\bfair enough\b", r"\byou have a point\b",
     r"\bi was wrong\b", r"\bi'?ll give you that\b", r"\bpartially agree\b",
     r"\bi see your point\b", r"\bthat'?s a valid\b", r"\bi concede\b",
-    r"\bi acknowledge\b", r"\bi stand corrected\b",
+    r"\bi acknowledge\b", r"\bi stand corrected\b", r"\bi guess you'?re right\b",
+    r"\bperhaps you'?re right\b", r"\bmaybe you'?re right\b", r"\bthat might be true\b"
 ]
 
 
@@ -893,9 +903,8 @@ def _match_any(text: str, patterns: list[str]) -> bool:
 
 def _extract_mention_target(text: str, speaker: str, all_bots: list[str]) -> Optional[str]:
     """Extract the @mention target bot, excluding self-mentions."""
-    matches = re.findall(r'@(bot_\[?[123]\]?)', text, re.IGNORECASE)
-    # Normalize: remove brackets
-    normalized = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
+    matches = re.findall(r'@(bot_[123])\b', text, re.IGNORECASE)
+    normalized = [m.lower() for m in matches]
     # Exclude self-mentions
     others = [m for m in normalized if m != speaker and m in all_bots]
     return others[-1] if others else None
@@ -999,7 +1008,11 @@ def extract_events(
     if not mention_target and not any(
         e in events for e in ["AGREE", "DISAGREE", "ATTACK", "QUESTION", "CONCEDE"]
     ):
-        events.append("IGNORE")
+        if len(text) < 40:
+            events.append("IGNORE")
+        else:
+            # Fallback to mild disagreement if engaged but lacking keywords
+            events.append("DISAGREE")
 
     # 4. Target inference priority:
     #    @bot_x > last commenter > None
@@ -1190,6 +1203,8 @@ def apply_intervention(
     """
     Apply an intervention delta to the target bot's state.
     Logs to InterventionLog regardless of success.
+    NOTE: This function modifies the SQLAlchemy Session but does NOT call db.commit().
+    The caller is responsible for committing the transaction.
     Returns True if delta was applied.
     """
     target_bot = intervention.get("target_bot", "")
@@ -1565,6 +1580,34 @@ class PersonalityEngine:
             db.flush()  # flush to get ID without committing
         return state
 
+    def initialize_session_states(self, db: Session, session_id: int):
+        """Pre-initialize agent states with opposing stances to ensure dynamic debate."""
+        bots = ["bot_1", "bot_2", "bot_3"]
+        # Randomly assign Pro (0.8), Con (-0.8), and Neutral/Nuanced (0.0)
+        stances = [0.8, -0.8, 0.0]
+        random.shuffle(stances)
+        
+        for i, bot_name in enumerate(bots):
+            state = db.query(CurrentAgentState).filter(
+                CurrentAgentState.session_id == session_id,
+                CurrentAgentState.bot_name == bot_name
+            ).first()
+            if not state:
+                state = CurrentAgentState(
+                    session_id=session_id,
+                    bot_name=bot_name,
+                    traits_json=json.dumps([0.0] * 22),
+                    states_json=json.dumps([0.0] * 10),
+                    affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
+                    memory_json=json.dumps([0.0] * 8),
+                    opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
+                    power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
+                    residual_json=json.dumps([0.0] * 16)
+                )
+                db.add(state)
+        db.flush()
+
+
     # =================================================================
     # Edge State Management (Directed Relationship Tensors)
     # =================================================================
@@ -1909,11 +1952,13 @@ All LPDE state is decoded to natural language descriptions.
 
 import re
 import logging
+import asyncio
 from typing import List, Optional
 
 logger = logging.getLogger("PromptAdapter")
 
 GIST_CACHE = {}  # maps (bot_name, raw_content) -> gist string
+GIST_CACHE_LOCK = asyncio.Lock()
 
 
 # =====================================================================
@@ -2016,16 +2061,16 @@ class PromptAdapter:
     # -----------------------------------------------------------------
 
     async def _generate_gist(self, bot_name: str, msg: str) -> str:
-        """Generate a short stance summary via God LLM with heuristic fallback."""
+        """Generate a short stance summary via main LLM with heuristic fallback."""
         fallback = msg[:60].rstrip() + ("..." if len(msg) > 60 else "")
         try:
-            from src.orchestration.runner import god_llm
+            from src.orchestration.runner import main_llm
             prompt = (
                 f"Summarize this statement by {bot_name} into one short English phrase (5-10 words). "
                 f"Output ONLY the summary phrase, nothing else.\n"
                 f"Statement: \"{msg}\""
             )
-            result = await god_llm.generate_completion(
+            result = await main_llm.generate_completion(
                 "You summarize forum comments into short stance descriptions.",
                 prompt,
                 max_tokens=30
@@ -2034,7 +2079,7 @@ class PromptAdapter:
             if gist and len(gist) > 3:
                 return gist
         except Exception as e:
-            logger.warning(f"Failed to generate gist via God LLM: {e}")
+            logger.warning(f"Failed to generate gist via main_llm: {e}")
         return fallback
 
     # -----------------------------------------------------------------
@@ -2055,11 +2100,13 @@ class PromptAdapter:
             msg = item.get("message", "").strip()
 
             cache_key = (bot_name, msg)
-            if cache_key in GIST_CACHE:
-                gist = GIST_CACHE[cache_key]
-            else:
+            async with GIST_CACHE_LOCK:
+                gist = GIST_CACHE.get(cache_key)
+
+            if not gist:
                 gist = await self._generate_gist(bot_name, msg)
-                GIST_CACHE[cache_key] = gist
+                async with GIST_CACHE_LOCK:
+                    GIST_CACHE[cache_key] = gist
 
             line = f"- {bot_name}'s stance: {gist}"
             structured_lines.append(line)
@@ -2109,9 +2156,9 @@ class PromptAdapter:
         if persona:
             # Strip the common rules suffix to keep it compact
             persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
-            if len(persona_short) > 300:
-                persona_short = persona_short[:300].rstrip() + "..."
-            sections.append(f"Personality Profile:\n{persona_short}")
+            if len(persona_short) > 200:
+                persona_short = persona_short[:200].rstrip() + "..."
+            sections.append(f"Personality:\n{persona_short}")
 
         # --- 3. Current Internal State (NL decoded) ---
         affect = lpde_state.get("affect", [0.0, 0.0])
@@ -2169,10 +2216,9 @@ class PromptAdapter:
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
             f"Instruction:\n"
-            f"Write one short, original reply in English (1-2 sentences).\n"
-            f"Respond ONLY as {current_bot}. Do NOT write dialogue for other bots.\n"
-            f"Do NOT use 'bot_x:' prefixes. Output only your own final message.\n"
-            f"You MUST mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
+            f"Write a 1-sentence reply in English defending your stance. Address the last point directly.\n"
+            f"Do NOT use prefixes like 'bot_x:'.\n"
+            f"Mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
         )
 
         return "\n\n".join(sections)
@@ -2232,8 +2278,7 @@ def init_db():
         if db.query(BotState).count() == 0:
             logger.info("[DB] Initializing bot states...")
             bots = ["bot_1", "bot_2", "bot_3"]
-            for b in bots:
-                db.add(BotState(bot_name=b, anger_targets="{}"))
+            db.add_all([BotState(bot_name=b, anger_targets="{}") for b in bots])
             db.commit()
     except Exception as e:
         logger.error(f"[DB ERROR] Failed to initialize database: {e}")
@@ -2329,7 +2374,7 @@ class CurrentAgentState(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]")
+    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AgentStateSnapshot(Base):
@@ -2345,7 +2390,7 @@ class AgentStateSnapshot(Base):
     memory_json = Column(Text, default="[]")
     opinion_json = Column(Text, default="[]")
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]")
+    residual_json = Column(Text, default="[]") # NOTE: Temporary workaround to store event data until event_data_json migration
     created_at = Column(DateTime, default=datetime.now)
 
 class EdgeState(Base):
@@ -2369,6 +2414,189 @@ class InterventionLog(Base):
     delta_json = Column(Text, default="{}")
     reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+
+```
+
+### File: `src/orchestration/context_builder.py`
+```python
+import json
+import logging
+import math
+from typing import Dict, Tuple
+
+from src.db.models import BotState, Comment
+
+logger = logging.getLogger("ContextBuilder")
+
+def safe_json_loads(value, default):
+    try:
+        if value is None:
+            return default
+
+        if isinstance(value, type(default)):
+            return value
+
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, type(default)) else default
+
+        return default
+
+    except Exception as e:
+        logger.warning(f"[JSON WARNING] Failed to parse JSON value: {value} | Error: {e}")
+        return default
+
+
+def calculate_effective_anger(anger_dict: dict) -> float:
+    if not anger_dict or not isinstance(anger_dict, dict):
+        return 0.0
+
+    sum_sq = 0.0
+    for val in anger_dict.values():
+        try:
+            num = float(val)
+            sum_sq += num ** 2
+        except Exception:
+            continue
+
+    return math.sqrt(sum_sq)
+
+
+def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: float) -> str:
+    """Compressed tag-based emotion prompt for 1.8B models"""
+    try:
+        if not isinstance(anger_targets, dict):
+            anger_targets = {}
+
+        safe_targets = {}
+        for k, v in anger_targets.items():
+            try:
+                if not isinstance(k, str) or not k.strip():
+                    continue
+                num_val = float(v)
+                if num_val < 0:
+                    num_val = 0.0
+                safe_targets[k] = num_val
+            except Exception:
+                continue
+
+        try:
+            effective_anger = float(effective_anger)
+            if effective_anger < 0:
+                effective_anger = 0.0
+        except Exception:
+            effective_anger = 0.0
+
+        sorted_targets = sorted(
+            safe_targets.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:2]
+        
+        target_str = ",".join([f"{k}:{v:.0f}" for k, v in sorted_targets])
+        if not target_str:
+            target_str = "None"
+            
+        if effective_anger < 30:
+            state = "CALM"
+        elif effective_anger < 70:
+            state = "IRRITATED"
+        else:
+            state = "ENRAGED"
+
+        return f"[SYS_STATE: {bot_name}|ANG:{effective_anger:.0f}({state})|TGT:{target_str}]"
+
+    except Exception as e:
+        logger.warning(f"[EMOTION PROMPT WARNING] Failed to build emotion prompt for {bot_name}: {e}")
+        return f"[SYS_STATE: {bot_name}|CALM]"
+
+
+async def generate_director_directive(db, current_bot: str, recent_history: str, eff_anger: float) -> str:
+    """
+    Disabled God LLM call by default to save resources, 
+    returns a short static directive instead.
+    """
+    directive = "Point out a specific flaw in the opponent's logic."
+    
+    try:
+        bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
+        if bot_state:
+            bot_state.current_directive = directive
+            db.commit()
+    except Exception as e:
+        logger.warning(f"[DB WARNING] Could not update directive for {current_bot}: {e}")
+        
+    return directive
+
+
+def get_or_create_bot_state(db, current_bot):
+    bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
+
+    if not bot_state:
+        logger.warning(f"[TURN WARNING] BotState not found for {current_bot}. Creating fallback state.")
+        bot_state = BotState(bot_name=current_bot, anger_targets="{}")
+        db.add(bot_state)
+        db.commit()
+        db.refresh(bot_state)
+
+    return bot_state
+
+
+async def build_turn_context(db, post, current_bot, use_structured=False) -> Tuple[Dict, float, str, str]:
+    bot_state = get_or_create_bot_state(db, current_bot)
+
+    anger_dict = safe_json_loads(bot_state.anger_targets, {})
+    if not isinstance(anger_dict, dict):
+        anger_dict = {}
+
+    safe_anger_dict = {}
+    for k, v in anger_dict.items():
+        try:
+            safe_anger_dict[k] = float(v)
+        except Exception:
+            continue
+
+    eff_anger = calculate_effective_anger(safe_anger_dict)
+    emotion_directive = build_emotion_prompt(current_bot, safe_anger_dict, eff_anger)
+
+    from src.orchestration.sanitizer import sanitize_generated_reply
+
+    recent_c = (
+        db.query(Comment)
+        .filter(Comment.post_id == post.id)
+        .order_by(Comment.id.desc())
+        .limit(3)
+        .all()
+    )
+
+    async def _format_recent_history(items):
+        valid_items = []
+        for item in reversed(items):
+            if not item or not item.content:
+                continue
+            msg = sanitize_generated_reply(item.content)
+            if not msg:
+                continue
+            valid_items.append({"bot_name": item.bot_name, "message": msg})
+
+        if use_structured:
+            from src.core.prompt_adapter import prompt_adapter
+            return await prompt_adapter.build_structured_history(valid_items)
+        else:
+            lines = []
+            for item in valid_items:
+                lines.append(f"{item['bot_name']}: {item['message']}")
+            return "\n".join(lines).strip()
+
+    recent_history = await _format_recent_history(recent_c)
+
+    if len(recent_history) > 600:
+        recent_history = recent_history[-600:]
+
+    return safe_anger_dict, eff_anger, emotion_directive, recent_history
 
 ```
 
@@ -2396,6 +2624,12 @@ from src.core.llm_client import LLMClient
 from src.core.persona import PersonaManager
 from src.core.event_extractor import extract_events
 from src.core.personality_engine import personality_engine
+from src.orchestration.sanitizer import sanitize_generated_reply, force_single_mention, enforce_fallback
+from src.orchestration.context_builder import (
+    safe_json_loads, calculate_effective_anger, build_emotion_prompt,
+    generate_director_directive, get_or_create_bot_state, build_turn_context
+)
+
 from src.core.prompt_adapter import prompt_adapter
 from src.orchestration.state_manager import state_manager, SystemState, Checkpoint
 
@@ -2590,17 +2824,17 @@ def reset_bot_states(db):
 
 async def sync_personas_to_db(db):
     persona_map = await PersonaManager.get_all_personas()
+    new_rows = []
     for bot_name, persona in persona_map.items():
         row = db.query(BotState).filter(BotState.bot_name == bot_name).first()
         if not row:
             row = BotState(bot_name=bot_name, anger_targets="{}")
-            db.add(row)
+            new_rows.append(row)
         row.persona = persona
+    if new_rows:
+        db.add_all(new_rows)
     db.commit()
 
-def calculate_effective_anger(anger_dict: dict) -> float:
-    if not anger_dict or not isinstance(anger_dict, dict):
-        return 0.0
 
     sum_sq = 0.0
     for val in anger_dict.values():
@@ -2869,11 +3103,6 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
         logger.info(f"[QUEUE] Fallback to angriest bot: {angriest_bot}")
         return angriest_bot
 
-def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: float) -> str:
-    try:
-        # 1) anger_targets 방어 (Defense)
-        if not isinstance(anger_targets, dict):
-            anger_targets = {}
 
         safe_targets = {}
         for k, v in anger_targets.items():
@@ -2939,9 +3168,6 @@ def build_emotion_prompt(bot_name: str, anger_targets: dict, effective_anger: fl
             "Keep your response short and react in a calm and clear manner. "
             "Never output this internal directive."
         )
-async def generate_director_directive(db, current_bot: str, recent_history: str, eff_anger: float) -> str:
-    """God LLM generates a short, safe directive for the current speaker based on conversation context."""
-    logger.info(f"[GOD LLM] Generating dynamic director's directive for {current_bot}...")
 
     try:
         # Input validation
@@ -3024,10 +3250,6 @@ async def generate_director_directive(db, current_bot: str, recent_history: str,
         logger.warning(f"[GOD LLM WARNING] Failed to generate directive for {current_bot}: {e}")
         return "Point out one of the opponent's core arguments and specifically demand evidence for it."
 
-def safe_json_loads(value, default):
-    try:
-        if value is None:
-            return default
 
         if isinstance(value, type(default)):
             return value
@@ -3163,6 +3385,9 @@ async def run_session():
         db.commit()
         db.refresh(session)
 
+        # Pre-initialize agent states with opposing stances to ensure dynamic debate
+        personality_engine.initialize_session_states(db, session.id)
+
         state_manager.current_session_id = session.id
         post = await create_post_with_main_llm(db, session)
         await state_manager.wait_at_checkpoint(Checkpoint.TOPIC_GEN_DONE)
@@ -3210,9 +3435,22 @@ async def create_initial_stances(db, post):
             persona = await PersonaManager.get_persona(b_name)
             bot_client = bots[b_name]
 
+            # Load agent state to read the pre-assigned stance
+            agent_state = personality_engine.load_agent_state(db, post.session_id, b_name)
+            opinion = json.loads(agent_state.opinion_json)
+            stance = opinion[0] if opinion else 0.0
+
+            if stance > 0.3:
+                stance_instruction = "You strongly support/agree with the main argument of this post. Write a response expressing clear support."
+            elif stance < -0.3:
+                stance_instruction = "You strongly oppose/disagree with the main argument of this post. Write a response expressing clear opposition."
+            else:
+                stance_instruction = "Your position is nuanced and flexible. Write a response reflecting a neutral, moderate, or balanced stance."
+
             prompt = (
                 f"Post Content: {post.content}\n\n"
                 f"Instruction: State your position on the above post clearly and concisely in 1-2 sentences. Reply in English.\n"
+                f"{stance_instruction}\n"
             )
 
             reply_content = await bot_client.generate_completion(
@@ -3264,8 +3502,6 @@ async def create_initial_stances(db, post):
 
     return stances, last_comment, last_speaker
 
-async def build_turn_context(db, post, current_bot, use_structured=False):
-    bot_state = get_or_create_bot_state(db, current_bot)
 
     anger_dict = safe_json_loads(bot_state.anger_targets, {})
     if not isinstance(anger_dict, dict):
@@ -3325,9 +3561,7 @@ async def generate_relay_reply(
 
     # [LPDE Feature Flags]
     LPDE_STRUCTURED_HISTORY = os.getenv("LPDE_STRUCTURED_HISTORY", "true").lower() == "true"
-    LPDE_FULL_PROMPT = os.getenv("LPDE_FULL_PROMPT", "false").lower() == "true"
-    LPDE_LEGACY_PROMPT = os.getenv("LPDE_LEGACY_PROMPT", "false").lower() == "true"
-    LPDE_COUNTER_ARG = os.getenv("LPDE_COUNTER_ARG", "false").lower() == "true"
+    LPDE_COUNTER_ARG = os.getenv("LPDE_COUNTER_ARG", "true").lower() == "true"
     LPDE_INTERVENTION_ENABLED = os.getenv("LPDE_INTERVENTION", "false").lower() == "true"
 
     # --- Phase 2A: Event Extraction from last comment ---
@@ -3341,7 +3575,7 @@ async def generate_relay_reply(
             speaker=last_speaker or "unknown",
             all_bots=all_bots,
             parent_comment_text=None,  # We track parent-of-parent later if needed
-            last_target=current_bot,
+            last_target=last_speaker,
         )
     else:
         event_data = {
@@ -3373,10 +3607,11 @@ async def generate_relay_reply(
                 db, post.session_id, current_bot
             )
             arousal_val = lpde_state.get("affect", [0.0, 0.0])[1]
+            tension_val = personality_engine.get_edges_for_bot(db, post.session_id, current_bot).get('tension', 0.0)
 
             # Intervention trigger conditions:
             # Every 3 turns OR arousal > 0.7
-            should_intervene = (turn_idx % 3 == 0 and turn_idx > 0) or arousal_val > 0.7
+            should_intervene = (turn_idx % 3 == 0 and turn_idx > 0) or tension_val > 0.6
             if should_intervene:
                 intervention = await generate_intervention_json(
                     god_llm, current_bot, lpde_state, recent_history, arousal_val
@@ -3388,64 +3623,33 @@ async def generate_relay_reply(
         except Exception as e:
             logger.warning(f"[INTERVENTION WARNING] Failed: {e}")
 
-    # --- Build Prompt ---
-    if LPDE_FULL_PROMPT:
-        # Phase 2A: Full LPDE-driven prompt via PromptAdapter
-        lpde_state = personality_engine.get_current_state_dict(
-            db, post.session_id, current_bot
-        )
-        edge_summary = personality_engine.get_edges_for_bot(
-            db, post.session_id, current_bot
-        )
+    # --- Phase 2A: Full LPDE-driven prompt via PromptAdapter ---
+    lpde_state = personality_engine.get_current_state_dict(
+        db, post.session_id, current_bot
+    )
+    edge_summary = personality_engine.get_edges_for_bot(
+        db, post.session_id, current_bot
+    )
 
-        # Determine target for prompt context
-        target_bot = event_data.get("target") if event_data else None
-        claim_snippet = ""
-        if last_comment_text:
-            from src.core.event_extractor import _extract_claim_snippet
-            claim_snippet = _extract_claim_snippet(last_comment_text)
+    # Determine target for prompt context
+    target_bot = event_data.get("target") if event_data else None
+    claim_snippet = ""
+    if last_comment_text:
+        from src.core.event_extractor import _extract_claim_snippet
+        claim_snippet = _extract_claim_snippet(last_comment_text)
 
-        prompt = prompt_adapter.build_prompt(
-            current_bot=current_bot,
-            persona=persona,
-            lpde_state=lpde_state,
-            edge_summary=edge_summary,
-            target_bot=target_bot,
-            recent_history=recent_history,
-            post_content=post.content,
-            claim_snippet=claim_snippet,
-            counter_arg_enabled=LPDE_COUNTER_ARG,
-            god_directive=god_directive,
-        )
-    elif LPDE_LEGACY_PROMPT:
-        # True legacy prompt (for A/B comparison)
-        prompt = (
-            f"Post Content: {post.content}\n\n"
-            f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
-            f"Instruction: State your opinion by either refuting or agreeing with the recent conversation in 1-2 sentences. Reply in English.\n"
-            f"DO NOT write a chat script. DO NOT use 'bot_x:' prefixes. Just output your own statement directly.\n"
-            f"You MUST mention exactly one of '@bot_1', '@bot_2', or '@bot_3' at the end of your message (do NOT mention yourself).\n"
-        )
-    else:
-        # Phase 1A: Hardened prompt (shadow mode + hardening)
-        prompt = (
-            f"Post Content: {post.content}\n\n"
-            f"Recent Conversation:\n{recent_history if recent_history else 'No recent conversation'}\n\n"
-            f"Current Speaker: {current_bot}\n"
-            f"Instruction: You are {current_bot}. "
-            f"Respond ONLY as {current_bot} in 1-2 sentences in English.\n"
-            f"Do NOT write dialogue for other bots. "
-            f"Do NOT write a chat script. "
-            f"Do NOT use 'bot_x:' prefixes. "
-            f"Output only your own final message.\n"
-            f"You MUST mention exactly one of '@bot_1', '@bot_2', or '@bot_3' at the end of your message (do NOT mention yourself).\n"
-        )
-
-        if god_directive:
-            prompt += f"\nDirector Hint: {god_directive}\n"
-
-        if emotion_directive:
-            prompt += f"\nEmotional State: {emotion_directive}\n"
+    prompt = prompt_adapter.build_prompt(
+        current_bot=current_bot,
+        persona=persona,
+        lpde_state=lpde_state,
+        edge_summary=edge_summary,
+        target_bot=target_bot,
+        recent_history=recent_history,
+        post_content=post.content,
+        claim_snippet=claim_snippet,
+        counter_arg_enabled=LPDE_COUNTER_ARG,
+        god_directive=god_directive,
+    )
 
     reply_content = await bot_client.generate_completion(
         persona, 
@@ -3546,8 +3750,6 @@ def save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, 
     return c
 
 
-def get_or_create_bot_state(db, current_bot):
-    bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
 
     if not bot_state:
         logger.warning(f"[TURN WARNING] BotState not found for {current_bot}. Creating fallback state.")
@@ -3633,18 +3835,11 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker, start_t
         db.commit()
 
 
-def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
-    if not text or not isinstance(text, str):
-        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
-        chosen = random.choice(candidates) if candidates else "bot_1"
-        return f"@{chosen}", chosen
 
-    matches = re.findall(r'@(bot_\[?[123]\]?)(?!\d)', text, flags=re.IGNORECASE)
-    # Normalize bot name by removing brackets for comparison
-    matches = [re.sub(r'[\[\]]', '', m).lower() for m in matches]
-    matches = [m for m in matches if m != current_bot]
+    matches = re.findall(r'@(bot_[123])\b', text, flags=re.IGNORECASE)
+    matches = [m.lower() for m in matches if m.lower() != current_bot]
 
-    cleaned = re.sub(r'@(bot_\[?[123]\]?)(?!\d)', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'@(bot_[123])\b', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s+', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.!?])', r'\1', cleaned)
     cleaned = cleaned.strip(" ,")
@@ -3660,67 +3855,56 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
 
     return f"@{chosen}", chosen
 
-def enforce_fallback(text: str, current_bot: str) -> str:
-    if not text or not text.strip():
-        fallback_replies = [
-            "I think you're avoiding the main issue. Can you clarify your point?",
-            "That seems to miss the core point. Can you explain further?",
-            "The argument is getting a bit muddy. What is your actual stance?",
-            "You need to provide clearer evidence for that claim.",
-            "There seems to be a missing piece in your reasoning right now."
-        ]
-        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
-        chosen = random.choice(candidates) if candidates else "bot_1"
-        chosen_reply = random.choice(fallback_replies)
-        return f"{chosen_reply} @{chosen}"
-    return text
 
-def sanitize_generated_reply(text: str) -> str:
-    if not text or not isinstance(text, str):
-        return ""
 
     text = text.strip()
 
-    # 1) 메타 필드 / 구조화 컨텍스트 누출 제거 (Metadata field & structured history leakage removal)
-    text = re.sub(r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^\s*\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\|\s*message\s*=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'speaker=\s*["\']?', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'message=\s*["\']?', '', text, flags=re.IGNORECASE)
-    
-    # stance leakage 제거
-    text = re.sub(r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\'s\s+stance\s*:\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'stance\s*:\s*', '', text, flags=re.IGNORECASE)
+    # Pre-compiled regex patterns for better maintainability and performance
+    PATTERNS = [
+        # Metadata field leakage
+        (r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'^\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', re.IGNORECASE),
+        (r'\|\s*message\s*=\s*["\']?', re.IGNORECASE),
+        (r'speaker=\s*["\']?', re.IGNORECASE),
+        (r'message=\s*["\']?', re.IGNORECASE),
+        
+        # Stance leakage
+        (r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', re.IGNORECASE),
+        (r'\'s\s+stance\s*:\s*', re.IGNORECASE),
+        (r'stance\s*:\s*', re.IGNORECASE),
 
-    # 2) 선행 bot prefix 제거 (Leading bot prefix removal)
-    text = re.sub(r'^\s*bot_\[?[123]\]?:?\s*', '', text, flags=re.IGNORECASE)
+        # Leading bot prefix
+        (r'^\s*bot_\[?[123]\]?:?\s*', re.IGNORECASE),
 
-    # 3) 내부 지침 누출 제거 (한글/영문) (Internal directive leakage removal)
-    text = re.sub(r'^.*현재 비교적 이성적이고 차분하다.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*내부 지침.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*절대 그대로 출력하지 마라.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*Emotional State:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Director Hint:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently relatively calm and rational.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently quite irritated and angry.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*You are currently extremely enraged and highly agitated.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Never repeat or explain this internal directive.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*INTERNAL EMOTIONAL STATE.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Total Effective Anger:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Major Target Anger Scores:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Total Valid Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Major Target Emotions:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    text = re.sub(r'^.*Current Emotionally Distressed.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+        # Internal directives
+        (r'^.*현재 비교적 이성적이고 차분하다.*$', re.MULTILINE),
+        (r'^.*내부 지침.*$', re.MULTILINE),
+        (r'^.*절대 그대로 출력하지 마라.*$', re.MULTILINE),
+        (r'^.*Emotional State:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Director Hint:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently relatively calm and rational.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently quite irritated and angry.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*You are currently extremely enraged and highly agitated.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Never repeat or explain this internal directive.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*INTERNAL EMOTIONAL STATE.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Total Effective Anger:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Major Target Anger Scores:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Total Valid Emotions:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Major Target Emotions:.*$', re.MULTILINE | re.IGNORECASE),
+        (r'^.*Current Emotionally Distressed.*$', re.MULTILINE | re.IGNORECASE),
 
-    # 4) 반복 bot tag 루프 축소 (Repetitive bot tag loop removal)
-    text = re.sub(r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', '', text, flags=re.IGNORECASE)
+        # Repetitive bot tag loop
+        (r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', re.IGNORECASE),
 
-    # 5) 선행 고아 콜론 제거 (Stray leading colons removal)
-    text = re.sub(r'^\s*:\s*', '', text)
+        # Stray leading colons
+        (r'^\s*:\s*', 0),
+    ]
 
-    # 6) 공백 정리 (Clean up whitespace)
+    for pattern, flags in PATTERNS:
+        text = re.sub(pattern, '', text, flags=flags)
+
+    # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n\s*\n+', '\n', text)
     text = text.strip()
@@ -3835,6 +4019,168 @@ async def restart_session(session_id: int):
         state_manager.set_state(SystemState.IDLE)
     finally:
         db.close()
+
+```
+
+### File: `src/orchestration/sanitizer.py`
+```python
+import re
+import random
+import logging
+
+logger = logging.getLogger("Sanitizer")
+
+# Pre-compiled regex patterns for better maintainability and performance
+_PATTERNS = [
+    # Metadata field leakage
+    (re.compile(r'^\s*-\s*speaker\s*=\s*bot_[123]\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE), ''),
+    (re.compile(r'^\s*\|\s*message\s*=\s*["\']?', re.IGNORECASE), ''),
+    (re.compile(r'^\s*speaker\s*=\s*bot_[123]\s*\|\s*', re.IGNORECASE), ''),
+    (re.compile(r'\|\s*message\s*=\s*["\']?', re.IGNORECASE), ''),
+    (re.compile(r'speaker=\s*["\']?', re.IGNORECASE), ''),
+    (re.compile(r'message=\s*["\']?', re.IGNORECASE), ''),
+    
+    # Stance leakage
+    (re.compile(r'^bot_\[?[123]\]?\'s\s+stance\s*:\s*', re.IGNORECASE), ''),
+    (re.compile(r'\'s\s+stance\s*:\s*', re.IGNORECASE), ''),
+    (re.compile(r'stance\s*:\s*', re.IGNORECASE), ''),
+
+    # Leading bot prefix
+    (re.compile(r'^\s*bot_\[?[123]\]?:?\s*', re.IGNORECASE), ''),
+
+    # Internal directives
+    (re.compile(r'^.*현재 비교적 이성적이고 차분하다.*$', re.MULTILINE), ''),
+    (re.compile(r'^.*내부 지침.*$', re.MULTILINE), ''),
+    (re.compile(r'^.*절대 그대로 출력하지 마라.*$', re.MULTILINE), ''),
+    (re.compile(r'^.*Emotional State:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Director Hint:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*You are currently relatively calm and rational.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*You are currently quite irritated and angry.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*You are currently extremely enraged and highly agitated.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Never repeat or explain this internal directive.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*INTERNAL EMOTIONAL STATE.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Total Effective Anger:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Major Target Anger Scores:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Total Valid Emotions:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Major Target Emotions:.*$', re.MULTILINE | re.IGNORECASE), ''),
+    (re.compile(r'^.*Current Emotionally Distressed.*$', re.MULTILINE | re.IGNORECASE), ''),
+
+    # Repetitive bot tag loop
+    (re.compile(r'(?:\bbot_\[?[123]\]?\b[\s,:]*){3,}', re.IGNORECASE), ''),
+
+    # Stray leading colons
+    (re.compile(r'^\s*:\s*'), ''),
+]
+
+_MENTION_PATTERN = re.compile(r'@(bot_[123])\b', re.IGNORECASE)
+
+def sanitize_generated_reply(text: str) -> str:
+    if not text or not isinstance(text, str):
+        return ""
+
+    text = text.strip()
+
+    for pattern, replacement in _PATTERNS:
+        text = pattern.sub(replacement, text)
+
+    # Clean up whitespace
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n', text)
+    text = text.strip()
+
+    # bot tag 및 mention을 제외한 실질 텍스트 내용으로 길이 검증
+    text_content = re.sub(r'@?bot_\[?[123]\]?', '', text, flags=re.IGNORECASE).strip()
+    
+    # A. 길이 검증 (짧아도 구두점 .?! 이 있으면 살림)
+    if len(text_content) < 8 and not re.search(r'[.!?]', text_content):
+        return ""
+
+    # B. 실질 내용 없이 bot tag / mention만 남았는지 검증
+    temp = re.sub(r'[^\w]', '', text_content)
+    if not temp.strip():
+        return ""
+
+    # C. 연속 반복 감지
+    if re.search(r'(\b\w+\b)( \1){3,}', text, flags=re.IGNORECASE):
+        return ""
+
+    # D. 동일 단어 비율 및 고유 단어 다양성 비율 감지
+    words = [w.lower().strip(".,!?\"'()[]{}*-_") for w in text_content.split()]
+    words = [w for w in words if w]
+    if len(words) >= 6:
+        word_counts = {}
+        for w in words:
+            word_counts[w] = word_counts.get(w, 0) + 1
+        max_count = max(word_counts.values())
+        max_ratio = max_count / len(words)
+        
+        if max_ratio >= 0.5:
+            return ""
+
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.45:
+            return ""
+
+    if text.endswith('"') or text.endswith("'"):
+        if text.count('"') % 2 != 0:
+            text = text.rstrip('"')
+        if text.count("'") % 2 != 0:
+            text = text.rstrip("'")
+
+    return text
+
+def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
+    if not text or not isinstance(text, str):
+        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        chosen = random.choice(candidates) if candidates else "bot_1"
+        return f"@{chosen}", chosen
+
+    matches = _MENTION_PATTERN.findall(text)
+    matches = [m.lower() for m in matches if m.lower() != current_bot]
+
+    cleaned = _MENTION_PATTERN.sub('', text)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'\s+([,.!?])', r'\1', cleaned)
+    cleaned = cleaned.strip(" ,")
+
+    if matches:
+        chosen = matches[-1]
+    else:
+        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        chosen = random.choice(candidates) if candidates else "bot_1"
+
+    if cleaned:
+        return f"{cleaned} @{chosen}", chosen
+
+    return f"@{chosen}", chosen
+
+def enforce_fallback(text: str, current_bot: str) -> str:
+    if not text or not text.strip():
+        fallback_replies = [
+            "I think you're avoiding the main issue. Can you clarify your point?",
+            "That seems to miss the core point. Can you explain further?",
+            "The argument is getting a bit muddy. What is your actual stance?",
+            "You need to provide clearer evidence for that claim.",
+            "There seems to be a missing piece in your reasoning right now.",
+            "Are you deliberately ignoring the obvious implications?",
+            "I strongly disagree with that logic. Could you try explaining it another way?",
+            "This isn't convincing at all. Provide a better rationale.",
+            "You're repeating the same weak point. Can we move on?",
+            "Let's refocus the discussion. What exactly are you trying to prove?",
+            "Your argument lacks substance. Do you have any real facts to support it?",
+            "What concrete proof do you have to back up that statement?",
+            "I can see where you're coming from, but the evidence doesn't support it. Care to elaborate?",
+            "That's an interesting perspective, but I find it fundamentally flawed.",
+            "Are we just going to ignore the counterarguments here?",
+            "If that's your stance, how do you explain the contradictions in your logic?",
+            "I disagree completely. Your reasoning seems entirely speculative.",
+            "Can you justify your opinion without relying on assumptions?"
+        ]
+        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        chosen = random.choice(candidates) if candidates else "bot_1"
+        chosen_reply = random.choice(fallback_replies)
+        return f"{chosen_reply} @{chosen}"
+    return text
 
 ```
 

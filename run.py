@@ -198,7 +198,7 @@ async def get_bot_inspector_summary(
         AgentStateSnapshot.bot_name == bot_name
     ).order_by(AgentStateSnapshot.turn_index.desc()).limit(2).all()
     
-    deltas = {"affect": None, "opinion": None, "power": None}
+    deltas = {"affect": [], "opinion": [], "power": []}
     if len(snapshots) >= 2:
         latest_snap = snapshots[0]
         prev_snap = snapshots[1]
@@ -226,7 +226,7 @@ async def get_bot_inspector_summary(
         return {
             "bot_name": bot_name,
             "session_id": session_id,
-            "phase": "shadow_updater_1A",
+            "phase": "LPDE_Phase_2",
             "active_dims": ["affect", "opinion", "power"],
             "message": "No LPDE state yet for this session",
             "legacy_state": {
@@ -236,7 +236,8 @@ async def get_bot_inspector_summary(
                 "anger_targets": anger_dict
             },
             "lpde_tensors": {"affect": [], "opinion": [], "power": []},
-            "deltas": deltas
+            "relation_summary": {},
+            "deltas": {"affect": [], "opinion": [], "power": []}
         }
 
     lpde_tensors = {
@@ -253,7 +254,7 @@ async def get_bot_inspector_summary(
         "bot_name": bot_name,
         "session_id": session_id,
         "updated_at": current_state.updated_at.strftime("%Y-%m-%d %H:%M:%S") if current_state.updated_at else None,
-        "phase": "shadow_updater_1A",
+        "phase": "LPDE_Phase_2",
         "active_dims": ["affect", "opinion", "power"],
         "legacy_state": {
             "persona": persona,

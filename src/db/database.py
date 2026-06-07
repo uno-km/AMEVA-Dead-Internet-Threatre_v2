@@ -46,8 +46,7 @@ def init_db():
         if db.query(BotState).count() == 0:
             logger.info("[DB] Initializing bot states...")
             bots = ["bot_1", "bot_2", "bot_3"]
-            for b in bots:
-                db.add(BotState(bot_name=b, anger_targets="{}"))
+            db.add_all([BotState(bot_name=b, anger_targets="{}") for b in bots])
             db.commit()
     except Exception as e:
         logger.error(f"[DB ERROR] Failed to initialize database: {e}")

@@ -11,11 +11,13 @@ All LPDE state is decoded to natural language descriptions.
 
 import re
 import logging
+import asyncio
 from typing import List, Optional
 
 logger = logging.getLogger("PromptAdapter")
 
 GIST_CACHE = {}  # maps (bot_name, raw_content) -> gist string
+GIST_CACHE_LOCK = asyncio.Lock()
 
 
 # =====================================================================
@@ -118,16 +120,16 @@ class PromptAdapter:
     # -----------------------------------------------------------------
 
     async def _generate_gist(self, bot_name: str, msg: str) -> str:
-        """Generate a short stance summary via God LLM with heuristic fallback."""
+        """Generate a short stance summary via main LLM with heuristic fallback."""
         fallback = msg[:60].rstrip() + ("..." if len(msg) > 60 else "")
         try:
-            from src.orchestration.runner import god_llm
+            from src.orchestration.runner import main_llm
             prompt = (
                 f"Summarize this statement by {bot_name} into one short English phrase (5-10 words). "
                 f"Output ONLY the summary phrase, nothing else.\n"
                 f"Statement: \"{msg}\""
             )
-            result = await god_llm.generate_completion(
+            result = await main_llm.generate_completion(
                 "You summarize forum comments into short stance descriptions.",
                 prompt,
                 max_tokens=30
@@ -136,7 +138,7 @@ class PromptAdapter:
             if gist and len(gist) > 3:
                 return gist
         except Exception as e:
-            logger.warning(f"Failed to generate gist via God LLM: {e}")
+            logger.warning(f"Failed to generate gist via main_llm: {e}")
         return fallback
 
     # -----------------------------------------------------------------
@@ -157,11 +159,13 @@ class PromptAdapter:
             msg = item.get("message", "").strip()
 
             cache_key = (bot_name, msg)
-            if cache_key in GIST_CACHE:
-                gist = GIST_CACHE[cache_key]
-            else:
+            async with GIST_CACHE_LOCK:
+                gist = GIST_CACHE.get(cache_key)
+
+            if not gist:
                 gist = await self._generate_gist(bot_name, msg)
-                GIST_CACHE[cache_key] = gist
+                async with GIST_CACHE_LOCK:
+                    GIST_CACHE[cache_key] = gist
 
             line = f"- {bot_name}'s stance: {gist}"
             structured_lines.append(line)
@@ -211,9 +215,9 @@ class PromptAdapter:
         if persona:
             # Strip the common rules suffix to keep it compact
             persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
-            if len(persona_short) > 300:
-                persona_short = persona_short[:300].rstrip() + "..."
-            sections.append(f"Personality Profile:\n{persona_short}")
+            if len(persona_short) > 200:
+                persona_short = persona_short[:200].rstrip() + "..."
+            sections.append(f"Personality:\n{persona_short}")
 
         # --- 3. Current Internal State (NL decoded) ---
         affect = lpde_state.get("affect", [0.0, 0.0])
@@ -271,10 +275,9 @@ class PromptAdapter:
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
             f"Instruction:\n"
-            f"Write one short, original reply in English (1-2 sentences).\n"
-            f"Respond ONLY as {current_bot}. Do NOT write dialogue for other bots.\n"
-            f"Do NOT use 'bot_x:' prefixes. Output only your own final message.\n"
-            f"You MUST mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
+            f"Write a 1-sentence reply in English defending your stance. Address the last point directly.\n"
+            f"Do NOT use prefixes like 'bot_x:'.\n"
+            f"Mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
         )
 
         return "\n\n".join(sections)
