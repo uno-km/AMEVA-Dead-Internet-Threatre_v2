@@ -675,14 +675,15 @@ async def create_initial_stances(db, post):
             if stance > 0.3:
                 stance_instruction = "You strongly support the post. Write a highly emotional, aggressive community comment (1-2 sentences) showing your support."
             elif stance < -0.3:
-                stance_instruction = "You strongly oppose the post. Write a cynical, hostile community comment (1-2 sentences) attacking the post's logic."
+                stance_instruction = "You strongly oppose the post. Write a snarky, hostile community comment (1-2 sentences) mocking the post's logic."
             else:
-                stance_instruction = "You are skeptical. Write a sarcastic or balanced community comment (1-2 sentences) pointing out nuances."
+                stance_instruction = "You are skeptical. Write a heavily sarcastic community comment (1-2 sentences) pointing out the absurdity of the topic."
 
             prompt = (
                 f"Post Content: {post.content}\n\n"
-                f"Instruction: Act as an anonymous, toxic internet user. Write a single short comment reacting to the post.\n"
-                f"CRITICAL: Do NOT use robotic templates like 'I strongly support/oppose the main argument of this post'. Be natural, informal, and highly opinionated.\n"
+                f"Instruction: Act as an angry, anonymous internet troll. Write a single short comment reacting to the post.\n"
+                f"CRITICAL: Be extremely sarcastic, rude, and emotionally charged. Use internet slang.\n"
+                f"Do NOT use polite or robotic templates like 'I strongly support/oppose'. Act like a real keyboard warrior.\n"
                 f"Reply in English.\n"
                 f"Your Stance: {stance_instruction}\n"
             )

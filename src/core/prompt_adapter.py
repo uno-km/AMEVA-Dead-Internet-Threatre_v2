@@ -234,18 +234,19 @@ class PromptAdapter:
             post_short = post_content[:300].rstrip() + ("..." if len(post_content) > 300 else "")
             sections.append(f"Original Topic:\n{post_short}")
 
-        # --- 5. Recent Conversation ---
+        # --- 4. Recent Conversation ---
         if recent_history and recent_history != "No previous conversation.":
-            sections.append(f"Recent Conversation:\n{recent_history}")
+            sections.append(f"--- START OF RECENT CONVERSATION ---\n{recent_history}\n--- END OF RECENT CONVERSATION ---")
 
-        # --- 6. Instruction ---
+        # --- 5. Instruction ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
             f"Instruction:\n"
-            f"Write a sharp, confrontational, but natural internet-style reply (1-2 sentences) in English.\n"
-            f"CRITICAL: Base your reply specifically on the opponent's last claim. Do NOT just repeat generic statements.\n"
-            f"Avoid threats, hate speech, or policy-violating content.\n"
-            f"Do NOT output prefixes like 'bot_x:'.\n"
+            f"Write a highly sarcastic, snarky, and emotionally charged internet comment (1-2 sentences) in English.\n"
+            f"CRITICAL: Read the Recent Conversation above. Mock their logic mercilessly. Use internet slang and a cynical tone.\n"
+            f"Do NOT copy or repeat phrases from the Recent Conversation. Come up with a NEW, original insult.\n"
+            f"Do NOT be polite, objective, or formal. Act like an angry keyboard warrior in a fierce online flame war.\n"
+            f"Do NOT output prefixes like 'bot_x:' or 'Bot's Response:'. Start your comment immediately.\n"
             f"Mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
         )
 

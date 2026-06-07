@@ -27,8 +27,10 @@ class LLMClient:
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "repetition_penalty": 1.2,
+            "temperature": 0.8,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.4,
+            "frequency_penalty": 0.4,
         }
         if stop:
             payload["stop"] = stop
