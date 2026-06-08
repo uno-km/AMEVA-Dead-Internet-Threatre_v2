@@ -56,12 +56,22 @@ class SessionBotState(Base):
     persona = Column(String)
     current_directive = Column(String, nullable=True)
     anger_targets = Column(String, default="{}")
+    role_label = Column(String, default="swing_moderate")   # Phase 3: stance role label (restart 복원용)
+    role_meta_json = Column(Text, default="{}")             # Phase 3: full role profile (restart 복원용)
     created_at = Column(DateTime, default=datetime.now)
 
     session = relationship("Session", backref="bot_states")
 
 class CurrentAgentState(Base):
-    """현재 LPDE 에이전트 상태 (Shadow Mode)"""
+    """
+    현재 LPDE 에이전트 상태 (Phase 2 Shadow Mode + Phase 3 Stance Role)
+
+    opinion_json 차원 정의 (Phase 3 재정의):
+      opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+      opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+      opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0] (기존 유지)
+      opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
+    """
     __tablename__ = 'current_agent_states'
     __table_args__ = (
         UniqueConstraint('session_id', 'bot_name', name='uq_current_agent_state_session_bot'),
@@ -73,14 +83,24 @@ class CurrentAgentState(Base):
     states_json = Column(Text, default="[]")
     affect_json = Column(Text, default="[]")
     memory_json = Column(Text, default="[]")
-    opinion_json = Column(Text, default="[]")
+    opinion_json = Column(Text, default="[]")   # [stance_pole, conviction, moral_salience, flexibility]
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]") 
-    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
+    residual_json = Column(Text, default="[]")
+    event_data_json = Column(Text, default="{}")        # Phase 2 Event storage
+    role_label = Column(String, default="swing_moderate")   # Phase 3: stance role label
+    role_meta_json = Column(Text, default="{}")             # Phase 3: full role profile (opportunism, aggression_bias, etc.)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AgentStateSnapshot(Base):
-    """턴 단위 LPDE 에이전트 상태 로깅"""
+    """
+    턴 단위 LPDE 에이전트 상태 로깅 (Phase 3: role 포함)
+
+    opinion_json 차원 정의 (Phase 3 재정의):
+      opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+      opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+      opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0] (기존 유지)
+      opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
+    """
     __tablename__ = 'agent_state_snapshots'
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey('sessions.id'), index=True)
@@ -90,10 +110,11 @@ class AgentStateSnapshot(Base):
     states_json = Column(Text, default="[]")
     affect_json = Column(Text, default="[]")
     memory_json = Column(Text, default="[]")
-    opinion_json = Column(Text, default="[]")
+    opinion_json = Column(Text, default="[]")   # [stance_pole, conviction, moral_salience, flexibility]
     power_json = Column(Text, default="[]")
     residual_json = Column(Text, default="[]")
-    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
+    event_data_json = Column(Text, default="{}")    # Phase 2 Event storage
+    role_label = Column(String, default="swing_moderate")  # Phase 3: snapshot 시점의 role label
     created_at = Column(DateTime, default=datetime.now)
 
 class EdgeState(Base):

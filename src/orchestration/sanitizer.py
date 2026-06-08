@@ -1,8 +1,80 @@
 import re
 import random
 import logging
+from typing import Optional
 
 logger = logging.getLogger("Sanitizer")
+
+# =====================================================================
+# Phase 3: Stance Coherence Validation
+# =====================================================================
+
+# pole_a = stance_pole < 0 (반대 측), pole_b = stance_pole > 0 (지지 측)
+# 하드라이너가 자기편을 포기하는 명시적 선언 패턴 목록
+_POLE_A_FLIP_PATTERNS = [
+    re.compile(r'\bI\s+(fully\s+)?(agree|support|endorse|am\s+for)\b', re.IGNORECASE),
+    re.compile(r'\byou(?:\'re|\s+are)\s+(?:absolutely|completely|totally)\s+right\b', re.IGNORECASE),
+    re.compile(r'\bI\s+was\s+wrong\b', re.IGNORECASE),
+    re.compile(r'\bI\s+(?:now\s+)?(?:believe|think|support)\s+(?:your|this|the)\s+(?:side|position|view)\b', re.IGNORECASE),
+]
+
+_POLE_B_FLIP_PATTERNS = [
+    re.compile(r'\bI\s+(completely\s+)?(oppose|reject|am\s+against|am\s+opposed\s+to)\b', re.IGNORECASE),
+    re.compile(r'\bI\s+(?:now\s+)?(?:fully\s+)?(?:agree\s+with|support)\s+the\s+opposition\b', re.IGNORECASE),
+    re.compile(r'\bI\s+was\s+wrong\b', re.IGNORECASE),
+]
+
+
+def validate_stance_coherence(text: str, role_label: str) -> bool:
+    """
+    Phase 3: 하드라이너 봇이 자기편 입장을 명시적으로 뒤집는지 감지.
+    
+    규칙:
+    - pole_a_hardliner: 지지(agree/support) 계열 명시 → False
+    - pole_b_hardliner: 반대(oppose/reject) 계열 명시 → False
+    - lean_a_soft / lean_b_soft: 느슨하게 (길이 기반만)
+    - swing_moderate / opportunistic_bandwagon / nihilist_observer: 항상 True (유연한 역할)
+
+    Returns:
+        True = 통과 (사용 가능), False = 거부 (fallback 처리)
+    """
+    if not text or not role_label:
+        return True
+
+    if role_label == "pole_a_hardliner":
+        for pattern in _POLE_A_FLIP_PATTERNS:
+            if pattern.search(text):
+                logger.warning(
+                    f"[COHERENCE] pole_a_hardliner flip detected. "
+                    f"Pattern: '{pattern.pattern[:50]}' in reply: '{text[:80]}'"
+                )
+                return False
+        return True
+
+    elif role_label == "pole_b_hardliner":
+        for pattern in _POLE_B_FLIP_PATTERNS:
+            if pattern.search(text):
+                logger.warning(
+                    f"[COHERENCE] pole_b_hardliner flip detected. "
+                    f"Pattern: '{pattern.pattern[:50]}' in reply: '{text[:80]}'"
+                )
+                return False
+        return True
+
+    # lean_* : 매우 짧고 무의미한 동조 응답 제거 (느슨한 검사)
+    elif role_label in ("lean_a_soft", "lean_b_soft"):
+        text_stripped = text.strip().lower()
+        # 5글자 이하인데 동조 단어만 있으면 거부
+        if len(text_stripped) < 20:
+            if re.match(r'^(yes|you\'re right|agreed|correct|indeed)[.!]?$', text_stripped):
+                logger.warning(f"[COHERENCE] lean role trivial agreement. reply: '{text[:60]}'")
+                return False
+        return True
+
+    # swing_moderate, opportunistic_bandwagon, nihilist_observer: 항상 통과
+    return True
+
+
 
 # Pre-compiled regex patterns for better maintainability and performance
 _PATTERNS = [

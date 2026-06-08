@@ -59,7 +59,7 @@ CREATE TABLE comments (
 	FOREIGN KEY(parent_id) REFERENCES comments (id)
 );
 
-CREATE TABLE session_bot_states (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, turn_index INTEGER, bot_name VARCHAR, persona VARCHAR, current_directive VARCHAR, anger_targets VARCHAR, created_at DATETIME, FOREIGN KEY(session_id) REFERENCES sessions(id));
+CREATE TABLE session_bot_states (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, turn_index INTEGER, bot_name VARCHAR, persona VARCHAR, current_directive VARCHAR, anger_targets VARCHAR, created_at DATETIME, role_label TEXT DEFAULT 'swing_moderate', role_meta_json TEXT DEFAULT '{}', FOREIGN KEY(session_id) REFERENCES sessions(id));
 
 CREATE TABLE sqlite_sequence(name,seq);
 
@@ -74,7 +74,7 @@ CREATE TABLE current_agent_states (
 	opinion_json TEXT, 
 	power_json TEXT, 
 	residual_json TEXT, 
-	updated_at DATETIME, 
+	updated_at DATETIME, event_data_json TEXT, role_label TEXT DEFAULT 'swing_moderate', role_meta_json TEXT DEFAULT '{}', 
 	PRIMARY KEY (id), 
 	CONSTRAINT uq_current_agent_state_session_bot UNIQUE (session_id, bot_name), 
 	FOREIGN KEY(session_id) REFERENCES sessions (id)
@@ -92,7 +92,7 @@ CREATE TABLE agent_state_snapshots (
 	opinion_json TEXT, 
 	power_json TEXT, 
 	residual_json TEXT, 
-	created_at DATETIME, 
+	created_at DATETIME, event_data_json TEXT, role_label TEXT DEFAULT 'swing_moderate', 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(session_id) REFERENCES sessions (id)
 );
@@ -175,7 +175,7 @@ services:
       - "8102:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -187,7 +187,7 @@ services:
       - "8103:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -199,7 +199,7 @@ services:
       - "8104:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen1.5-1.8b-chat-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -442,6 +442,12 @@ async def get_bot_inspector_summary(
         except:
             return []
 
+    def safe_load_dict(val):
+        try:
+            return json.loads(val) if val else {}
+        except:
+            return {}
+
     # Deltas
     snapshots = db.query(AgentStateSnapshot).filter(
         AgentStateSnapshot.session_id == session_id,
@@ -476,8 +482,12 @@ async def get_bot_inspector_summary(
         return {
             "bot_name": bot_name,
             "session_id": session_id,
-            "phase": "LPDE_Phase_2",
+            "phase": "LPDE_Phase_3",
             "active_dims": ["affect", "opinion", "power"],
+            "role_label": "swing_moderate",
+            "role_meta": {},
+            "conviction": None,
+            "flexibility": None,
             "message": "No LPDE state yet for this session",
             "legacy_state": {
                 "persona": persona,
@@ -490,22 +500,29 @@ async def get_bot_inspector_summary(
             "deltas": {"affect": [], "opinion": [], "power": []}
         }
 
+    # opinion_json 차원 정의 (Phase 3):
+    # opinion[0] = stance_pole, opinion[1] = conviction, opinion[2] = moral_salience, opinion[3] = flexibility
     lpde_tensors = {
         "affect": safe_load(current_state.affect_json),
         "opinion": safe_load(current_state.opinion_json),
         "power": safe_load(current_state.power_json)
     }
+    opinion_vec = lpde_tensors["opinion"]
 
     from src.core.personality_engine import personality_engine
-    
     relation_summary = personality_engine.get_edges_for_bot(db, session_id, bot_name)
 
     return {
         "bot_name": bot_name,
         "session_id": session_id,
         "updated_at": current_state.updated_at.strftime("%Y-%m-%d %H:%M:%S") if current_state.updated_at else None,
-        "phase": "LPDE_Phase_2",
+        "phase": "LPDE_Phase_3",
         "active_dims": ["affect", "opinion", "power"],
+        # Phase 3: role info
+        "role_label": getattr(current_state, "role_label", "swing_moderate"),
+        "role_meta": safe_load_dict(getattr(current_state, "role_meta_json", "{}")),
+        "conviction": opinion_vec[1] if len(opinion_vec) > 1 else None,
+        "flexibility": opinion_vec[3] if len(opinion_vec) > 3 else None,
         "legacy_state": {
             "persona": persona,
             "current_directive": current_directive,
@@ -561,6 +578,8 @@ async def get_bot_inspector_detail(
         }
 
     # Time series (reverse order so oldest first)
+    # opinion 차원: [stance_pole, conviction, moral_salience, flexibility]
+    # trajectory 좌표 표준: x=stance_pole, y=conviction, z=flexibility
     snapshots = db.query(AgentStateSnapshot).filter(
         AgentStateSnapshot.session_id == session_id,
         AgentStateSnapshot.bot_name == bot_name
@@ -569,11 +588,17 @@ async def get_bot_inspector_detail(
     time_series = []
     recent_events = []
     for snap in reversed(snapshots):
+        opinion_vec = safe_load(snap.opinion_json)
         time_series.append({
             "turn_index": snap.turn_index,
             "affect": safe_load(snap.affect_json),
-            "opinion": safe_load(snap.opinion_json),
-            "power": safe_load(snap.power_json)
+            "opinion": opinion_vec,
+            "power": safe_load(snap.power_json),
+            "role_label": getattr(snap, "role_label", "swing_moderate"),
+            # Phase 3 trajectory coords (standardized axes)
+            "x": opinion_vec[0] if len(opinion_vec) > 0 else 0.0,  # stance_pole
+            "y": opinion_vec[1] if len(opinion_vec) > 1 else 0.0,  # conviction
+            "z": opinion_vec[3] if len(opinion_vec) > 3 else 0.0,  # flexibility
         })
         
         event_data = safe_load_dict(snap.event_data_json)
@@ -683,9 +708,66 @@ async def control_restart(post_id: int, db: DbSession = Depends(get_db)):
     asyncio.create_task(restart_session(session_id))
     return {"message": f"Restarting post {post_id} (Session {session_id})"}
 
+@app.get("/api/lpde/bot/{bot_name}/trajectory")
+async def get_bot_trajectory(
+    bot_name: str,
+    session_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: DbSession = Depends(get_db)
+):
+    """
+    Phase 3: 봇의 3D 입장 궤적(trajectory)을 반환.
+    
+    좌표 표준 (3D 시각화 Three.js 연동 대비):
+      x = stance_pole   : opinion[0], 논쟁 축 방향 [-1.0 ~ +1.0]
+      y = conviction    : opinion[1], 입장 확신도 [0.0 ~ 1.0]
+      z = flexibility   : opinion[3], 유연성 [0.0 ~ 1.0]
+    """
+    import json
+    from src.db.models import Session, AgentStateSnapshot
+
+    if session_id is None:
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        session_id = latest_session.id if latest_session else None
+
+    def safe_load(val):
+        try:
+            return json.loads(val) if val else []
+        except:
+            return []
+
+    snapshots = db.query(AgentStateSnapshot).filter(
+        AgentStateSnapshot.session_id == session_id,
+        AgentStateSnapshot.bot_name == bot_name
+    ).order_by(AgentStateSnapshot.turn_index.asc()).limit(limit).all()
+
+    points = []
+    for snap in snapshots:
+        opinion_vec = safe_load(snap.opinion_json)
+        affect_vec = safe_load(snap.affect_json)
+        points.append({
+            "turn_index": snap.turn_index,
+            "x": opinion_vec[0] if len(opinion_vec) > 0 else 0.0,   # stance_pole
+            "y": opinion_vec[1] if len(opinion_vec) > 1 else 0.0,   # conviction
+            "z": opinion_vec[3] if len(opinion_vec) > 3 else 0.0,   # flexibility
+            "arousal": affect_vec[1] if len(affect_vec) > 1 else 0.0,
+            "role_label": getattr(snap, "role_label", "swing_moderate"),
+        })
+
+    return {
+        "bot_name": bot_name,
+        "session_id": session_id,
+        "axis_definition": {
+            "x": "stance_pole [-1.0 ~ +1.0]",
+            "y": "conviction [0.0 ~ 1.0]",
+            "z": "flexibility [0.0 ~ 1.0]"
+        },
+        "points": points
+    }
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=True)
+    uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=False)
 
 ```
 
@@ -1099,6 +1181,7 @@ async def generate_intervention_json(
     prompt = (
         f"[Debate Director Intervention]\n"
         f"Target bot: {bot_name}\n"
+        f"Current state: {json.dumps(current_state)}\n"
         f"Current arousal level: {arousal:.2f} (scale: -1 to 1)\n"
         f"Recent conversation:\n{recent_history[:400] if recent_history else 'None'}\n\n"
         f"You are the debate director. Decide whether to intervene.\n"
@@ -1115,6 +1198,7 @@ async def generate_intervention_json(
             "You are a debate director that outputs JSON intervention commands.",
             prompt,
             max_tokens=120,
+            response_format={"type": "json_object"}
         )
         return parse_intervention_json(result)
     except Exception as e:
@@ -1304,8 +1388,10 @@ class LLMClient:
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "repetition_penalty": 1.2,
+            "temperature": 0.8,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.4,
+            "frequency_penalty": 0.4,
         }
         if stop:
             payload["stop"] = stop
@@ -1507,6 +1593,8 @@ Edge tensor: Trust, Tension, Attention, Respect (4D per directed pair)
 import json
 import math
 import logging
+import random
+import random
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
@@ -1581,14 +1669,31 @@ class PersonalityEngine:
             db.flush()  # flush to get ID without committing
         return state
 
-    def initialize_session_states(self, db: Session, session_id: int):
-        """Pre-initialize agent states with opposing stances to ensure dynamic debate."""
-        bots = ["bot_1", "bot_2", "bot_3"]
-        # Randomly assign Pro (0.8), Con (-0.8), and Neutral/Nuanced (0.0)
-        stances = [0.8, -0.8, 0.0]
-        random.shuffle(stances)
+    def initialize_session_states(self, db: Session, session_id: int, role_triplet: Optional[dict] = None):
+        """
+        Pre-initialize agent states with role-based stance differentiation.
         
-        for i, bot_name in enumerate(bots):
+        Phase 3: role_triplet에서 stance_pole, conviction, flexibility를 opinion_json에 매핑.
+        role_triplet = {"bot_1": {...role profile...}, ...}
+        """
+        import json as _json
+        bots = ["bot_1", "bot_2", "bot_3"]
+
+        for bot_name in bots:
+            # Get role profile for this bot
+            role_profile = (role_triplet or {}).get(bot_name, {})
+            stance_pole = float(role_profile.get("stance_pole", 0.0))
+            conviction = float(role_profile.get("conviction", 0.4))
+            flexibility = float(role_profile.get("flexibility", 0.5))
+            role_label = role_profile.get("role_label", "swing_moderate")
+
+            # role_meta: opportunism + aggression_bias
+            role_meta = {
+                "opportunism": role_profile.get("opportunism", 0.3),
+                "aggression_bias": role_profile.get("aggression_bias", 0.35),
+                "stance_pole_init": stance_pole,
+            }
+
             state = db.query(CurrentAgentState).filter(
                 CurrentAgentState.session_id == session_id,
                 CurrentAgentState.bot_name == bot_name
@@ -1597,16 +1702,29 @@ class PersonalityEngine:
                 state = CurrentAgentState(
                     session_id=session_id,
                     bot_name=bot_name,
-                    traits_json=json.dumps([0.0] * 22),
-                    states_json=json.dumps([0.0] * 10),
-                    affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
-                    memory_json=json.dumps([0.0] * 8),
-                    opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
-                    power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                    residual_json=json.dumps([0.0] * 16),
-                    event_data_json="{}"
+                    traits_json=_json.dumps([0.0] * 22),
+                    states_json=_json.dumps([0.0] * 10),
+                    affect_json=_json.dumps([0.0, 0.0]),
+                    memory_json=_json.dumps([0.0] * 8),
+                    # opinion[0]=stance_pole, opinion[1]=conviction, opinion[2]=moral_salience, opinion[3]=flexibility
+                    opinion_json=_json.dumps([stance_pole, conviction, 0.0, flexibility]),
+                    power_json=_json.dumps([0.0, 0.0]),
+                    residual_json=_json.dumps([0.0] * 16),
+                    event_data_json="{}",
+                    role_label=role_label,
+                    role_meta_json=_json.dumps(role_meta, ensure_ascii=False),
                 )
                 db.add(state)
+            else:
+                # Update existing state with role info
+                state.opinion_json = _json.dumps([stance_pole, conviction, 0.0, flexibility])
+                state.role_label = role_label
+                state.role_meta_json = _json.dumps(role_meta, ensure_ascii=False)
+
+            logger.info(
+                f"[STANCE_INIT] {bot_name} -> {role_label} "
+                f"(pole={stance_pole:.2f}, conviction={conviction:.2f}, flexibility={flexibility:.2f})"
+            )
         db.flush()
 
 
@@ -1754,20 +1872,37 @@ class PersonalityEngine:
         new_arousal = self._clip(self._sigmoid_bound(arousal_decay + delta_arousal))
         new_affect = [round(new_valence, 4), round(new_arousal, 4)]
 
-        # --- Opinion Update (Stance, Gap, Moral, ...) ---
-        # Inertia-based decay with event perturbation
+        # --- Opinion Update ---
+        # opinion[0] = stance_pole, opinion[1] = conviction, opinion[2] = moral_salience, opinion[3] = flexibility
+        # Phase 3: conviction이 높을수록 drift 저항, flexibility가 높을수록 허용폭 증가
+        conviction_val = opinion[1] if len(opinion) > 1 else 0.4
+        flexibility_val = opinion[3] if len(opinion) > 3 else 0.5
+
+        # Resistance factor: conviction 높을수록 강하게 저항, flexibility 높을수록 완화
+        drift_resistance = self._clip_01(conviction_val * (1.0 - flexibility_val * 0.5))
+
         new_opinion = []
         for i, o in enumerate(opinion):
-            # Stance (index 0): shift slightly based on engagement
-            if i == 0:
+            if i == 0:  # stance_pole
                 stance_delta = 0.0
                 if "AGREE" in events:
-                    stance_delta += 0.05  # reinforces current stance
+                    stance_delta += 0.04 * (1.0 - drift_resistance)  # reinforces current stance slightly
                 if "DISAGREE" in events:
-                    stance_delta -= 0.03  # slight doubt
+                    stance_delta -= 0.02 * (1.0 - drift_resistance)  # slight doubt, damped by conviction
                 if "CONCEDE" in events:
-                    stance_delta -= 0.08  # significant doubt
-                new_opinion.append(self._clip(o * 0.98 + stance_delta))
+                    stance_delta -= 0.06 * (1.0 - drift_resistance)  # significant doubt, damped by conviction
+                # Decay: conviction이 높으면 원래 위치로 복원 경향
+                inertia = 0.99 - (0.01 * flexibility_val)  # high flex → more decay
+                new_opinion.append(self._clip(o * inertia + stance_delta))
+            elif i == 1:  # conviction — slowly erodes under sustained attack
+                conv_delta = 0.0
+                if "ATTACK" in events:
+                    conv_delta -= 0.01 * intensity
+                if "AGREE" in events:
+                    conv_delta += 0.01
+                new_opinion.append(self._clip_01(o * 0.995 + conv_delta))
+            elif i == 3:  # flexibility — mostly stable, can shift slightly
+                new_opinion.append(self._clip_01(o * 0.999))
             else:
                 new_opinion.append(self._clip(o * 0.98))
 
@@ -1902,10 +2037,12 @@ class PersonalityEngine:
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
             residual_json=agent.residual_json,
-            event_data_json=event_str
+            event_data_json=event_str,
+            role_label=getattr(agent, "role_label", "swing_moderate"),  # Phase 3
         )
         db.add(snap)
         # NO db.commit() here — batched in update_fast_state()
+
 
     # Legacy public alias (backward compat for walkthrough references)
     def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):
@@ -1944,14 +2081,20 @@ personality_engine = PersonalityEngine()
 ### File: `src/core/prompt_adapter.py`
 ```python
 """
-Prompt Adapter (Phase 2A)
+Prompt Adapter (Phase 3)
 
 Responsibilities:
 1. build_structured_history(): Gist-based structured history (legacy + Phase 2)
-2. build_prompt(): LPDE state → natural language prompt (Phase 2A, LPDE_FULL_PROMPT)
+2. build_prompt(): LPDE state → natural language prompt (Phase 3, role orientation 포함)
 
 Key principle: NO raw vector dumps in prompts.
 All LPDE state is decoded to natural language descriptions.
+
+opinion_json 차원 정의 (Phase 3):
+  opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+  opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+  opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0]
+  opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
 """
 
 import re
@@ -2133,6 +2276,7 @@ class PromptAdapter:
         claim_snippet: str = "",
         counter_arg_enabled: bool = False,
         god_directive: str = "",
+        role_meta: Optional[dict] = None,
     ) -> str:
         """
         Build the full LPDE-driven prompt for a crowd bot.
@@ -2140,7 +2284,7 @@ class PromptAdapter:
         Args:
             current_bot: The bot generating the reply (e.g. "bot_2")
             persona: The bot's persona system prompt
-            lpde_state: {"affect": [v, a], "opinion": [s, g, m, ...], "power": [sa, si]}
+            lpde_state: {"affect": [v, a], "opinion": [s, conv, m, flex], "power": [sa, si]}
             edge_summary: {target_bot: {"trust": ..., "tension": ..., ...}}
             target_bot: The primary debate opponent (from event extraction)
             recent_history: Formatted recent conversation string
@@ -2148,87 +2292,274 @@ class PromptAdapter:
             claim_snippet: Opponent's last claim (for counter-arg)
             counter_arg_enabled: Whether to enforce mandatory rebuttal
             god_directive: Optional director hint
+            role_meta: Phase 3 role profile dict from CurrentAgentState.role_meta_json
         """
         sections = []
 
         # --- 1. Role Binding ---
         sections.append(
-            f"You are {current_bot}. You are a real human internet user engaged in an online debate."
+            f"You are {current_bot}. You are a sharp and opinionated internet user in an online debate."
         )
 
-        # --- 2. Persona (collapsed) ---
+        # --- 2. Persona ---
         if persona:
-            # Strip the common rules suffix to keep it compact
             persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
-            if len(persona_short) > 200:
-                persona_short = persona_short[:200].rstrip() + "..."
-            sections.append(f"Personality:\n{persona_short}")
+            if len(persona_short) > 250:
+                persona_short = persona_short[:250].rstrip() + "..."
+            sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER describe or mention it explicitly in your reply.)")
 
-        # --- 3. Current Internal State (NL decoded) ---
-        affect = lpde_state.get("affect", [0.0, 0.0])
-        opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
-        power = lpde_state.get("power", [0.0, 0.0])
+        # --- 3. Role Orientation (Phase 3) ---
+        # decode_role_orientation uses stance_roles presets to generate a natural language description
+        if role_meta:
+            from src.core.stance_roles import decode_role_orientation
+            orientation_text = decode_role_orientation(role_meta)
+            sections.append(orientation_text)
+        else:
+            # Fallback: simple stance from opinion[0]
+            opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
+            stance = opinion[0] if len(opinion) > 0 else 0.0
+            if stance > 0.3:
+                sections.append("Role Orientation:\n- You strongly support the main argument.")
+            elif stance < -0.3:
+                sections.append("Role Orientation:\n- You strongly oppose the main argument.")
+            else:
+                sections.append("Role Orientation:\n- You are skeptical and nuanced.")
 
-        valence = affect[0] if len(affect) > 0 else 0.0
-        arousal = affect[1] if len(affect) > 1 else 0.0
-        stance = opinion[0] if len(opinion) > 0 else 0.0
-        self_appraisal = power[0] if len(power) > 0 else 0.0
-        influence = power[1] if len(power) > 1 else 0.0
-
-        state_lines = [
-            "Current Internal State:",
-            f"- {_decode_arousal(arousal)}",
-            f"- {_decode_valence(valence)}",
-            f"- {_decode_stance(stance)}",
-            f"- {_decode_self_appraisal(self_appraisal)}",
-            f"- {_decode_influence(influence)}",
-        ]
-
-        # Edge-based relationship descriptions
-        if target_bot and target_bot in edge_summary:
-            edge = edge_summary[target_bot]
-            trust = edge.get("trust", 0.0)
-            tension = edge.get("tension", 0.0)
-            state_lines.append(f"- {_decode_trust(trust, target_bot)}")
-            state_lines.append(f"- {_decode_tension(tension, target_bot)}")
-
-        sections.append("\n".join(state_lines))
-
-        # --- 4. Post Content ---
-        if post_content:
-            post_short = post_content[:200].rstrip() + ("..." if len(post_content) > 200 else "")
-            sections.append(f"Topic being debated:\n{post_short}")
-
-        # --- 5. Recent History ---
+        # --- 4. Recent Conversation ---
         if recent_history and recent_history != "No previous conversation.":
-            sections.append(f"Recent Conversation:\n{recent_history}")
+            sections.append(f"--- START OF RECENT CONVERSATION ---\n{recent_history}\n--- END OF RECENT CONVERSATION ---")
 
-        # --- 6. Counter-Argument Enforcement (Optional) ---
-        if counter_arg_enabled and claim_snippet:
-            sections.append(
-                f"[MANDATORY REBUTTAL]\n"
-                f"The opponent just claimed: \"{claim_snippet}\"\n"
-                f"You MUST directly address this specific claim before stating your own position. "
-                f"Do NOT ignore it. Either refute it with evidence, partially concede, or ask a pointed follow-up question."
-            )
-
-        # --- 7. Director Hint (Optional) ---
-        if god_directive:
-            sections.append(f"Director Hint: {god_directive}")
-
-        # --- 8. Output Instructions ---
+        # --- 5. Instruction ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
-            f"Instruction:\n"
-            f"Write a 1-sentence reply in English defending your stance. Address the last point directly.\n"
-            f"Do NOT use prefixes like 'bot_x:'.\n"
-            f"Mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
+            f"Task: Write a single 1-sentence cynical and argumentative reply challenging the opponent's claims.\n\n"
+            f"CRITICAL GUIDELINES:\n"
+            f"- Speak strictly in character according to your personality described above.\n"
+            f"- Maintain your role orientation throughout your reply — do NOT flip sides.\n"
+            f"- Do not use generic AI templates or polite phrasing.\n\n"
+            f"MANDATORY RULES:\n"
+            f"1. YOU MUST QUOTE: Quote 1-3 words from the opponent's comment in 'quotes' and mock or dismantle it using your persona.\n"
+            f"2. NEVER AGREE: Do not say you agree or that they are right. Strongly dispute their stance.\n"
+            f"3. FORMAT: Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end of your response. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
+            f"Example:\n"
+            f"Your claim about 'social media' is completely flawed and naive. @bot_2\n\n"
+            f"Your Reply:"
         )
 
         return "\n\n".join(sections)
 
 
 prompt_adapter = PromptAdapter()
+
+```
+
+### File: `src/core/stance_roles.py`
+```python
+"""
+Stance Role System (Phase 3)
+
+각 봇의 '입장 구조(stance role)'를 정의하고 세션 시작 시 배정한다.
+정치 라벨이 아닌 추상화된 역할(role)로 설계되어 있음.
+
+Role 구조:
+  role_label:     사람이 읽기 쉬운 역할 이름
+  stance_pole:    논쟁 축 방향 [-1.0 ~ +1.0] (opinion[0]에 매핑)
+  conviction:     자기 입장 확신도 [0.0 ~ 1.0] (opinion[1]에 매핑)
+  flexibility:    반박 시 흔들림 정도 [0.0 ~ 1.0] (opinion[3]에 매핑)
+  opportunism:    강한 쪽에 붙는 경향 [0.0 ~ 1.0] (role_meta_json에 저장)
+  aggression_bias:공격적 반응 경향 [0.0 ~ 1.0] (role_meta_json에 저장)
+
+배정 규칙 (assign_initial_role_triplet):
+  - 기본: pole_a_hardliner + pole_b_hardliner + third_role
+  - third_role: swing_moderate / lean_a_soft / lean_b_soft /
+                opportunistic_bandwagon / nihilist_observer 중 랜덤
+  - 양극단 2명은 항상 고정, 3번째만 변동
+  - 절대 금지: 셋 다 같은 pole / 셋 다 neutral / 셋 다 high flexibility
+"""
+
+import random
+import logging
+from typing import Optional
+
+logger = logging.getLogger("StanceRoles")
+
+# =====================================================================
+# Role Preset Definitions
+# =====================================================================
+
+ROLE_PRESETS: dict[str, dict] = {
+    "pole_a_hardliner": {
+        "role_label": "pole_a_hardliner",
+        "stance_pole": -0.9,
+        "conviction": 0.9,
+        "flexibility": 0.1,
+        "opportunism": 0.1,
+        "aggression_bias": 0.7,
+    },
+    "pole_b_hardliner": {
+        "role_label": "pole_b_hardliner",
+        "stance_pole": 0.9,
+        "conviction": 0.9,
+        "flexibility": 0.1,
+        "opportunism": 0.1,
+        "aggression_bias": 0.7,
+    },
+    "swing_moderate": {
+        "role_label": "swing_moderate",
+        "stance_pole": 0.0,
+        "conviction": 0.4,
+        "flexibility": 0.85,
+        "opportunism": 0.45,
+        "aggression_bias": 0.25,
+    },
+    "lean_a_soft": {
+        "role_label": "lean_a_soft",
+        "stance_pole": -0.35,
+        "conviction": 0.55,
+        "flexibility": 0.55,
+        "opportunism": 0.25,
+        "aggression_bias": 0.35,
+    },
+    "lean_b_soft": {
+        "role_label": "lean_b_soft",
+        "stance_pole": 0.35,
+        "conviction": 0.55,
+        "flexibility": 0.55,
+        "opportunism": 0.25,
+        "aggression_bias": 0.35,
+    },
+    "opportunistic_bandwagon": {
+        "role_label": "opportunistic_bandwagon",
+        "stance_pole": 0.1,
+        "conviction": 0.3,
+        "flexibility": 0.7,
+        "opportunism": 0.9,
+        "aggression_bias": 0.45,
+    },
+    "nihilist_observer": {
+        "role_label": "nihilist_observer",
+        "stance_pole": 0.0,
+        "conviction": 0.5,
+        "flexibility": 0.3,
+        "opportunism": 0.2,
+        "aggression_bias": 0.5,
+    },
+}
+
+# 3번째 봇에 배정 가능한 역할 목록 (양극단 제외)
+_THIRD_ROLE_POOL = [
+    "swing_moderate",
+    "lean_a_soft",
+    "lean_b_soft",
+    "opportunistic_bandwagon",
+    "nihilist_observer",
+]
+
+
+def get_role_profile(role_label: str) -> dict:
+    """
+    role_label로 preset dict를 반환.
+    없으면 swing_moderate를 기본값으로 반환.
+    """
+    profile = ROLE_PRESETS.get(role_label)
+    if profile is None:
+        logger.warning(f"[STANCE] Unknown role_label '{role_label}'. Defaulting to swing_moderate.")
+        return ROLE_PRESETS["swing_moderate"].copy()
+    return profile.copy()
+
+
+def assign_initial_role_triplet(seed: Optional[int] = None) -> dict[str, dict]:
+    """
+    세션 시작 시 3개 봇에 역할을 배정한다.
+
+    배정 규칙:
+      - pole_a_hardliner + pole_b_hardliner는 항상 배정
+      - 3번째 봇은 _THIRD_ROLE_POOL에서 랜덤 선택
+      - 세 봇의 순서는 무작위로 섞음 (어떤 봇이 hardliner가 될지 랜덤)
+      
+    Returns:
+      {
+        "bot_1": {...role profile...},
+        "bot_2": {...role profile...},
+        "bot_3": {...role profile...}
+      }
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    bots = ["bot_1", "bot_2", "bot_3"]
+
+    # 양극단 2명은 고정, 3번째 역할만 랜덤
+    third_role_label = random.choice(_THIRD_ROLE_POOL)
+
+    role_labels = [
+        "pole_a_hardliner",
+        "pole_b_hardliner",
+        third_role_label,
+    ]
+
+    # 3봇에 역할을 랜덤으로 섞어 배정
+    random.shuffle(role_labels)
+
+    triplet = {}
+    for bot_name, role_label in zip(bots, role_labels):
+        triplet[bot_name] = get_role_profile(role_label)
+        logger.info(f"[STANCE_INIT] {bot_name} -> {role_label}")
+
+    return triplet
+
+
+def decode_role_orientation(role_profile: dict) -> str:
+    """
+    role_profile을 프롬프트에 삽입할 자연어 텍스트로 디코딩.
+    prompt_adapter.py에서 호출된다.
+    """
+    label = role_profile.get("role_label", "swing_moderate")
+    conviction = role_profile.get("conviction", 0.5)
+    flexibility = role_profile.get("flexibility", 0.5)
+    opportunism = role_profile.get("opportunism", 0.3)
+
+    lines = ["Role Orientation:"]
+
+    # 1. Pole description
+    if label == "pole_a_hardliner":
+        lines.append("- You hold a strongly polarized position on one extreme side of this debate.")
+        lines.append("- You fundamentally oppose the other side and will not back down.")
+    elif label == "pole_b_hardliner":
+        lines.append("- You hold a strongly polarized position on the opposite extreme side of this debate.")
+        lines.append("- You fundamentally oppose the other side and will not back down.")
+    elif label in ("lean_a_soft", "lean_b_soft"):
+        lines.append("- You lean toward one side but are not a fanatic.")
+        lines.append("- You can acknowledge nuance, but your overall position is consistent.")
+    elif label == "swing_moderate":
+        lines.append("- You are not firmly committed to one side.")
+        lines.append("- You can be swayed by strong arguments or social pressure.")
+    elif label == "opportunistic_bandwagon":
+        lines.append("- You follow the momentum. If one side seems to be winning, you side with them.")
+        lines.append("- Your position is fluid and driven by who appears stronger in the debate.")
+    elif label == "nihilist_observer":
+        lines.append("- You question the premise of the entire debate.")
+        lines.append("- You are skeptical of both sides and challenge the framing itself.")
+
+    # 2. Conviction
+    if conviction >= 0.8:
+        lines.append("- You are highly confident and resistant to changing your mind.")
+        lines.append("- You rarely concede unless presented with overwhelming evidence.")
+    elif conviction >= 0.5:
+        lines.append("- You are moderately confident but open to reconsidering if pressed hard enough.")
+    else:
+        lines.append("- You are uncertain of your stance and may shift positions during the debate.")
+
+    # 3. Flexibility / opportunism
+    if flexibility >= 0.7:
+        lines.append("- You may partially agree or shift language to match the flow of the conversation.")
+    elif flexibility <= 0.2:
+        lines.append("- You are inflexible and will not soften your language regardless of pressure.")
+
+    if opportunism >= 0.7:
+        lines.append("- If the debate dynamic changes and one side grows stronger, you will adapt accordingly.")
+
+    return "\n".join(lines)
 
 ```
 
@@ -2359,12 +2690,22 @@ class SessionBotState(Base):
     persona = Column(String)
     current_directive = Column(String, nullable=True)
     anger_targets = Column(String, default="{}")
+    role_label = Column(String, default="swing_moderate")   # Phase 3: stance role label (restart 복원용)
+    role_meta_json = Column(Text, default="{}")             # Phase 3: full role profile (restart 복원용)
     created_at = Column(DateTime, default=datetime.now)
 
     session = relationship("Session", backref="bot_states")
 
 class CurrentAgentState(Base):
-    """현재 LPDE 에이전트 상태 (Shadow Mode)"""
+    """
+    현재 LPDE 에이전트 상태 (Phase 2 Shadow Mode + Phase 3 Stance Role)
+
+    opinion_json 차원 정의 (Phase 3 재정의):
+      opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+      opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+      opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0] (기존 유지)
+      opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
+    """
     __tablename__ = 'current_agent_states'
     __table_args__ = (
         UniqueConstraint('session_id', 'bot_name', name='uq_current_agent_state_session_bot'),
@@ -2376,14 +2717,24 @@ class CurrentAgentState(Base):
     states_json = Column(Text, default="[]")
     affect_json = Column(Text, default="[]")
     memory_json = Column(Text, default="[]")
-    opinion_json = Column(Text, default="[]")
+    opinion_json = Column(Text, default="[]")   # [stance_pole, conviction, moral_salience, flexibility]
     power_json = Column(Text, default="[]")
-    residual_json = Column(Text, default="[]") 
-    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
+    residual_json = Column(Text, default="[]")
+    event_data_json = Column(Text, default="{}")        # Phase 2 Event storage
+    role_label = Column(String, default="swing_moderate")   # Phase 3: stance role label
+    role_meta_json = Column(Text, default="{}")             # Phase 3: full role profile (opportunism, aggression_bias, etc.)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class AgentStateSnapshot(Base):
-    """턴 단위 LPDE 에이전트 상태 로깅"""
+    """
+    턴 단위 LPDE 에이전트 상태 로깅 (Phase 3: role 포함)
+
+    opinion_json 차원 정의 (Phase 3 재정의):
+      opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+      opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+      opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0] (기존 유지)
+      opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
+    """
     __tablename__ = 'agent_state_snapshots'
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey('sessions.id'), index=True)
@@ -2393,10 +2744,11 @@ class AgentStateSnapshot(Base):
     states_json = Column(Text, default="[]")
     affect_json = Column(Text, default="[]")
     memory_json = Column(Text, default="[]")
-    opinion_json = Column(Text, default="[]")
+    opinion_json = Column(Text, default="[]")   # [stance_pole, conviction, moral_salience, flexibility]
     power_json = Column(Text, default="[]")
     residual_json = Column(Text, default="[]")
-    event_data_json = Column(Text, default="{}") # Phase 2 Event storage
+    event_data_json = Column(Text, default="{}")    # Phase 2 Event storage
+    role_label = Column(String, default="swing_moderate")  # Phase 3: snapshot 시점의 role label
     created_at = Column(DateTime, default=datetime.now)
 
 class EdgeState(Base):
@@ -2474,42 +2826,66 @@ def calculate_effective_anger(anger_dict: dict) -> float:
 
 
 
-async def build_turn_context(db, post, current_bot, use_structured=False) -> str:
-    # 1A legacy features removed: safe_anger_dict, eff_anger, emotion_directive
-
+async def build_turn_context(db, post, current_bot, target_bot=None) -> str:
     from src.orchestration.sanitizer import sanitize_generated_reply
 
-    recent_c = (
+    lines = []
+
+    # 1. Opponent's First Comment
+    target_first = None
+    target_last = None
+    if target_bot:
+        target_comments = (
+            db.query(Comment)
+            .filter(Comment.post_id == post.id, Comment.bot_name == target_bot)
+            .order_by(Comment.id.asc())
+            .all()
+        )
+        if target_comments:
+            target_first = target_comments[0]
+            target_last = target_comments[-1]
+            
+            if target_first.content:
+                msg = sanitize_generated_reply(target_first.content)
+                if msg:
+                    lines.append(f"Opponent's first comment ({target_bot}): {msg}")
+
+    # 2. My Last Reply
+    my_last = (
         db.query(Comment)
-        .filter(Comment.post_id == post.id)
+        .filter(Comment.post_id == post.id, Comment.bot_name == current_bot)
         .order_by(Comment.id.desc())
-        .limit(3)
-        .all()
+        .first()
     )
+    if my_last and my_last.content:
+        msg = sanitize_generated_reply(my_last.content)
+        if msg:
+            lines.append(f"What you said before (DO NOT REPEAT THIS): {msg}")
 
-    async def _format_recent_history(items):
-        valid_items = []
-        for item in reversed(items):
-            if not item or not item.content:
-                continue
-            msg = sanitize_generated_reply(item.content)
-            if not msg:
-                continue
-            valid_items.append({"bot_name": item.bot_name, "message": msg})
+    # 3. Opponent's Latest Reply
+    if target_last and target_last.content and (not target_first or target_last.id != target_first.id):
+        msg = sanitize_generated_reply(target_last.content)
+        if msg:
+            lines.append(f"Opponent's latest reply ({target_bot}): {msg}")
+    elif not target_bot:
+        # Fallback if no specific target
+        fallback_last = (
+            db.query(Comment)
+            .filter(Comment.post_id == post.id, Comment.bot_name != current_bot)
+            .order_by(Comment.id.desc())
+            .first()
+        )
+        if fallback_last and fallback_last.content:
+            msg = sanitize_generated_reply(fallback_last.content)
+            if msg:
+                lines.append(f"Opponent's latest reply ({fallback_last.bot_name}): {msg}")
 
-        if use_structured:
-            from src.core.prompt_adapter import prompt_adapter
-            return await prompt_adapter.build_structured_history(valid_items)
-        else:
-            lines = []
-            for item in valid_items:
-                lines.append(f"{item['bot_name']}: {item['message']}")
-            return "\n".join(lines).strip()
-
-    recent_history = await _format_recent_history(recent_c)
-
-    if len(recent_history) > 600:
-        recent_history = recent_history[-600:]
+    recent_history = "\n\n".join(lines).strip()
+    if len(recent_history) > 1000:
+        recent_history = recent_history[-1000:]
+        
+    if not recent_history:
+        recent_history = "No previous conversation."
 
     return recent_history
 
@@ -2535,6 +2911,8 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from src.db.database import SessionLocal
 from src.db.models import Session, Post, Comment, BotState, SessionBotState
+from src.db.models import CurrentAgentState  # Phase 3: role_meta loading
+
 from src.core.llm_client import LLMClient
 from src.core.persona import PersonaManager
 from src.core.event_extractor import extract_events
@@ -2749,7 +3127,7 @@ async def sync_personas_to_db(db):
         db.add_all(new_rows)
     db.commit()
 
-
+def calculate_effective_anger(anger_dict: dict) -> float:
     sum_sq = 0.0
     for val in anger_dict.values():
         try:
@@ -3018,169 +3396,6 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
         return angriest_bot
 
 
-        safe_targets = {}
-        for k, v in anger_targets.items():
-            try:
-                if not isinstance(k, str) or not k.strip():
-                    continue
-                num_val = float(v)
-                # 음수 방지 (Prevent negative numbers)
-                if num_val < 0:
-                    num_val = 0.0
-                safe_targets[k] = num_val
-            except Exception:
-                continue
-
-        # 2) effective_anger 방어 (Defense)
-        try:
-            effective_anger = float(effective_anger)
-            if effective_anger < 0:
-                effective_anger = 0.0
-        except Exception:
-            effective_anger = 0.0
-
-        # 3) 프롬프트 길이/오염 방지: 상위 2개 타겟만 노출 (Prevent prompt pollution: show top 2 targets only)
-        sorted_targets = sorted(
-            safe_targets.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:2]
-        target_str = ", ".join([f"{k}: {v:.1f}" for k, v in sorted_targets])
-        if not target_str:
-            target_str = "None"
-        # 4) 내부 지침 명시 (출력 금지) (Specify internal directive - do not output)
-        base_info = (
-            "[INTERNAL EMOTIONAL STATE - DO NOT OUTPUT THIS DIRECTIVE OR MENTION THESE METRICS]\n"
-            f"bot: {bot_name}\n"
-            f"Total Effective Anger: {effective_anger:.1f}\n"
-            f"Major Target Anger Scores: {target_str}\n"
-        )
-        if effective_anger < 30:
-            directive = (
-                "You are currently relatively calm and rational. "
-                "Keep your response concise and natural, focusing clearly on the main point of the debate. "
-                "Never repeat or explain this internal directive in your output."
-            )
-        elif effective_anger < 70:
-            directive = (
-                "You are currently quite irritated and angry. "
-                "Point out logical fallacies or contradictions in the target bot's arguments and retort sharply. "
-                "Never repeat or explain this internal directive in your output."
-            )
-        else:
-            directive = (
-                "You are currently extremely enraged and highly agitated. "
-                "Do not hide your anger; unleash intense criticism and fierce rebuttals at the target bot. "
-                "Aggressively attack their attitude and arguments, but do not avoid the conversation. Focus on replying directly to their core points."
-            )
-        return base_info + directive
-
-    except Exception as e:
-        logger.warning(f"[EMOTION PROMPT WARNING] Failed to build emotion prompt for {bot_name}: {e}")
-        return (
-            "[INTERNAL EMOTIONAL STATE - DO NOT OUTPUT THIS DIRECTIVE]\n"
-            "Keep your response short and react in a calm and clear manner. "
-            "Never output this internal directive."
-        )
-
-    try:
-        # Input validation
-        if not isinstance(current_bot, str) or not current_bot.strip():
-            current_bot = "bot"
-
-        try:
-            eff_anger = float(eff_anger)
-            if eff_anger < 0:
-                eff_anger = 0.0
-        except Exception:
-            eff_anger = 0.0
-
-        if not isinstance(recent_history, str):
-            recent_history = ""
-
-        # Clean recent history: remove meta headers and internal directives
-        recent_history = recent_history.strip()
-        recent_history = re.sub(r'^\s*\[.*?\]\s*$', '', recent_history, flags=re.MULTILINE)
-        recent_history = re.sub(
-            r'^\s*(Total Effective Anger|Major Target Anger Scores)\s*[:=].*$',
-            '', recent_history, flags=re.MULTILINE | re.IGNORECASE
-        )
-        recent_history = re.sub(r'\n\s*\n+', '\n', recent_history).strip()
-
-        # Truncate if too long
-        if len(recent_history) > 500:
-            recent_history = recent_history[-500:]
-
-        prompt = (
-            f"[Recent Conversation]\n{recent_history if recent_history else 'No recent conversation'}\n\n"
-            f"[Target Bot] {current_bot} (Tension/Anger Level: {eff_anger:.0f}/100)\n\n"
-            f"You are the debate director. Generate a single, short instruction in English for {current_bot} to follow in their next reply.\n"
-            f"Rules:\n"
-            f"- Instruct the bot to address exactly one core point of the opponent's argument.\n"
-            f"- Avoid personal insults, mockery, threats, or incitement.\n"
-            f"- Guide the bot to ask for evidence or to clarify a specific point.\n"
-            f"- Output ONLY the directive sentence. Do not include list formatting, meta-explanations, quotation marks, or introductions.\n"
-            f"Example: Point out the weakest link in the opponent's reasoning and specifically ask for supporting evidence."
-        )
-        result = await god_llm.generate_completion(
-            "You are the debate director. Output a single short, direct instruction in English.", 
-            prompt,
-            max_tokens=60
-        )
-
-        directive = str(result).strip() if result else ""
-
-        # Strip code blocks, quotes, and meta wrappers
-        directive = re.sub(r"```(?:json|text)?\s*(.*?)\s*```", r"\1", directive, flags=re.DOTALL)
-        directive = re.sub(r'^\s*["\'`]+|["\'`]+\s*$', '', directive)
-        directive = re.sub(r'^\s*\[.*?\]\s*', '', directive)
-
-        # Multi-line: take first line only
-        if '\n' in directive:
-            directive = directive.split('\n')[0].strip()
-
-        # Multi-sentence: take first sentence only
-        sentence_match = re.match(r'^(.+?[.!?]|.+?$)', directive)
-        if sentence_match:
-            directive = sentence_match.group(1).strip()
-
-        # Fallback if too short or invalid
-        if not directive or len(directive) < 5:
-            directive = "Point out one of the opponent's core arguments and specifically demand evidence for it."
-
-        # Length limit
-        if len(directive) > 120:
-            directive = directive[:120].rstrip()
-            
-        bot_state = db.query(BotState).filter(BotState.bot_name == current_bot).first()
-        if bot_state:
-            bot_state.current_directive = directive
-            db.commit()
-
-        logger.info(f"[GOD LLM] Director's Directive for {current_bot}: {directive}")
-        return directive
-
-    except Exception as e:
-        logger.warning(f"[GOD LLM WARNING] Failed to generate directive for {current_bot}: {e}")
-        return "Point out one of the opponent's core arguments and specifically demand evidence for it."
-
-
-        if isinstance(value, type(default)):
-            return value
-
-        if isinstance(value, str):
-            value = value.strip()
-            if not value:
-                return default
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, type(default)) else default
-
-        return default
-
-    except Exception as e:
-        logger.warning(f"[JSON WARNING] Failed to parse JSON value: {value} | Error: {e}")
-        return default
-
 
 def normalize_post_content(text: str) -> str:
     try:
@@ -3299,8 +3514,12 @@ async def run_session():
         db.commit()
         db.refresh(session)
 
-        # Pre-initialize agent states with opposing stances to ensure dynamic debate
-        personality_engine.initialize_session_states(db, session.id)
+        # Phase 3: Assign initial role triplet (pole_a + pole_b + third_role)
+        from src.core.stance_roles import assign_initial_role_triplet
+        role_triplet = assign_initial_role_triplet()
+
+        # Pre-initialize agent states with role-based stance differentiation
+        personality_engine.initialize_session_states(db, session.id, role_triplet)
 
         state_manager.current_session_id = session.id
         post = await create_post_with_main_llm(db, session)
@@ -3355,16 +3574,19 @@ async def create_initial_stances(db, post):
             stance = opinion[0] if opinion else 0.0
 
             if stance > 0.3:
-                stance_instruction = "You strongly support/agree with the main argument of this post. Write a response expressing clear support."
+                stance_instruction = "You strongly support the post. Write a highly emotional, aggressive community comment (1-2 sentences) showing your support."
             elif stance < -0.3:
-                stance_instruction = "You strongly oppose/disagree with the main argument of this post. Write a response expressing clear opposition."
+                stance_instruction = "You strongly oppose the post. Write a snarky, hostile community comment (1-2 sentences) mocking the post's logic."
             else:
-                stance_instruction = "Your position is nuanced and flexible. Write a response reflecting a neutral, moderate, or balanced stance."
+                stance_instruction = "You are skeptical. Write a heavily sarcastic community comment (1-2 sentences) pointing out the absurdity of the topic."
 
             prompt = (
                 f"Post Content: {post.content}\n\n"
-                f"Instruction: State your position on the above post clearly and concisely in 1-2 sentences. Reply in English.\n"
-                f"{stance_instruction}\n"
+                f"Instruction: Act as an angry, anonymous internet troll. Write a single short comment reacting to the post.\n"
+                f"CRITICAL: Be extremely sarcastic, rude, and emotionally charged. Use internet slang.\n"
+                f"Do NOT use polite or robotic templates like 'I strongly support/oppose'. Act like a real keyboard warrior.\n"
+                f"Reply in English.\n"
+                f"Your Stance: {stance_instruction}\n"
             )
 
             reply_content = await bot_client.generate_completion(
@@ -3459,9 +3681,9 @@ async def generate_relay_reply(
         db, post.session_id, current_bot, turn_index=turn_idx, event_data=event_data
     )
 
-    # Build turn context (recent history only)
+    # Build turn context (targeted history)
     recent_history = await build_turn_context(
-        db, post, current_bot, use_structured=LPDE_STRUCTURED_HISTORY
+        db, post, current_bot, target_bot=last_speaker
     )
     
     # Phase 2A: Director hint is now a static helper for 1.8B models
@@ -3514,6 +3736,22 @@ async def generate_relay_reply(
         from src.core.event_extractor import _extract_claim_snippet
         claim_snippet = _extract_claim_snippet(last_comment_text)
 
+    # Phase 3: Load role_meta from CurrentAgentState for role orientation in prompt
+    import json as _json
+    _cas = db.query(CurrentAgentState).filter(
+        CurrentAgentState.session_id == post.session_id,
+        CurrentAgentState.bot_name == current_bot
+    ).first()
+    role_meta = None
+    if _cas and _cas.role_meta_json:
+        try:
+            _rm = _json.loads(_cas.role_meta_json)
+            if _rm:  # non-empty
+                role_label = getattr(_cas, "role_label", "swing_moderate")
+                role_meta = {**_rm, "role_label": role_label}
+        except Exception:
+            pass
+
     prompt = prompt_adapter.build_prompt(
         current_bot=current_bot,
         persona=persona,
@@ -3525,7 +3763,9 @@ async def generate_relay_reply(
         claim_snippet=claim_snippet,
         counter_arg_enabled=LPDE_COUNTER_ARG,
         god_directive=god_directive,
+        role_meta=role_meta,
     )
+
 
     reply_content = await bot_client.generate_completion(
         persona, 
@@ -3543,7 +3783,17 @@ async def generate_relay_reply(
         ]
     )
     reply_content = sanitize_generated_reply(reply_content)
+
+    # Phase 3: Stance coherence check for hardliner roles
+    if reply_content and role_meta:
+        from src.orchestration.sanitizer import validate_stance_coherence
+        _role_label_check = role_meta.get("role_label", "swing_moderate")
+        if not validate_stance_coherence(reply_content, _role_label_check):
+            logger.warning(f"[COHERENCE FAIL] {current_bot} ({_role_label_check}): stance flip detected, using fallback.")
+            reply_content = ""  # trigger enforce_fallback
+
     reply_content = enforce_fallback(reply_content, current_bot)
+
     reply_content, mentioned = force_single_mention(reply_content, current_bot)
 
     return reply_content, mentioned
@@ -3625,27 +3875,29 @@ def save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, 
     logger.info(f"[{current_bot.upper()}] {reply_content} (Mentioned: {mentioned})")
     return c
 
-
-
-    if not bot_state:
-        logger.warning(f"[TURN WARNING] BotState not found for {current_bot}. Creating fallback state.")
-        bot_state = BotState(bot_name=current_bot, anger_targets="{}")
-        db.add(bot_state)
-        db.commit()
-        db.refresh(bot_state)
-
-    return bot_state
-
 def save_session_bot_state(db, session_id: int, turn_idx: int):
+    """Snapshot bot states per turn — including Phase 3 role info for restart restoration."""
+    from src.db.models import CurrentAgentState as _CAS
+    import json as _json
     states = db.query(BotState).all()
     for s in states:
+        # Try to get role info from CurrentAgentState
+        cas = db.query(_CAS).filter(
+            _CAS.session_id == session_id,
+            _CAS.bot_name == s.bot_name
+        ).first()
+        role_label = getattr(cas, "role_label", "swing_moderate") if cas else "swing_moderate"
+        role_meta_json = getattr(cas, "role_meta_json", "{}") if cas else "{}"
+
         record = SessionBotState(
             session_id=session_id,
             turn_index=turn_idx,
             bot_name=s.bot_name,
             persona=s.persona,
             current_directive=s.current_directive,
-            anger_targets=s.anger_targets
+            anger_targets=s.anger_targets,
+            role_label=role_label,
+            role_meta_json=role_meta_json,
         )
         db.add(record)
     db.commit()
@@ -3856,7 +4108,7 @@ async def restart_session(session_id: int):
         latest_state = db.query(SessionBotState).filter(SessionBotState.session_id == session_id).order_by(SessionBotState.turn_index.desc()).first()
         max_turn_idx = (latest_state.turn_index + 1) if latest_state else 0
 
-        # Restore states
+        # Restore legacy bot states from last saved SessionBotState
         for bot_name in ["bot_1", "bot_2", "bot_3"]:
             st = db.query(SessionBotState).filter(SessionBotState.session_id == session_id, SessionBotState.bot_name == bot_name).order_by(SessionBotState.turn_index.desc()).first()
             if st:
@@ -3868,9 +4120,21 @@ async def restart_session(session_id: int):
                 bs.current_directive = st.current_directive
                 bs.anger_targets = st.anger_targets
 
+                # Phase 3: Restore role disposition into CurrentAgentState (B안: 복원 보장)
+                if st.role_label and st.role_label != "swing_moderate":
+                    cas = db.query(CurrentAgentState).filter(
+                        CurrentAgentState.session_id == session_id,
+                        CurrentAgentState.bot_name == bot_name
+                    ).first()
+                    if cas:
+                        cas.role_label = st.role_label
+                        cas.role_meta_json = getattr(st, "role_meta_json", "{}")
+                        logger.info(f"[RESTART] Restored role for {bot_name}: {st.role_label}")
+
         db.commit()
 
         logger.info(f"[ORCHESTRATOR] Restarting session {session_id} from turn {max_turn_idx}")
+
         
         bot_targets = [
             ("ameva-llm-bot-1", 8102),
@@ -3903,8 +4167,80 @@ async def restart_session(session_id: int):
 import re
 import random
 import logging
+from typing import Optional
 
 logger = logging.getLogger("Sanitizer")
+
+# =====================================================================
+# Phase 3: Stance Coherence Validation
+# =====================================================================
+
+# pole_a = stance_pole < 0 (반대 측), pole_b = stance_pole > 0 (지지 측)
+# 하드라이너가 자기편을 포기하는 명시적 선언 패턴 목록
+_POLE_A_FLIP_PATTERNS = [
+    re.compile(r'\bI\s+(fully\s+)?(agree|support|endorse|am\s+for)\b', re.IGNORECASE),
+    re.compile(r'\byou(?:\'re|\s+are)\s+(?:absolutely|completely|totally)\s+right\b', re.IGNORECASE),
+    re.compile(r'\bI\s+was\s+wrong\b', re.IGNORECASE),
+    re.compile(r'\bI\s+(?:now\s+)?(?:believe|think|support)\s+(?:your|this|the)\s+(?:side|position|view)\b', re.IGNORECASE),
+]
+
+_POLE_B_FLIP_PATTERNS = [
+    re.compile(r'\bI\s+(completely\s+)?(oppose|reject|am\s+against|am\s+opposed\s+to)\b', re.IGNORECASE),
+    re.compile(r'\bI\s+(?:now\s+)?(?:fully\s+)?(?:agree\s+with|support)\s+the\s+opposition\b', re.IGNORECASE),
+    re.compile(r'\bI\s+was\s+wrong\b', re.IGNORECASE),
+]
+
+
+def validate_stance_coherence(text: str, role_label: str) -> bool:
+    """
+    Phase 3: 하드라이너 봇이 자기편 입장을 명시적으로 뒤집는지 감지.
+    
+    규칙:
+    - pole_a_hardliner: 지지(agree/support) 계열 명시 → False
+    - pole_b_hardliner: 반대(oppose/reject) 계열 명시 → False
+    - lean_a_soft / lean_b_soft: 느슨하게 (길이 기반만)
+    - swing_moderate / opportunistic_bandwagon / nihilist_observer: 항상 True (유연한 역할)
+
+    Returns:
+        True = 통과 (사용 가능), False = 거부 (fallback 처리)
+    """
+    if not text or not role_label:
+        return True
+
+    if role_label == "pole_a_hardliner":
+        for pattern in _POLE_A_FLIP_PATTERNS:
+            if pattern.search(text):
+                logger.warning(
+                    f"[COHERENCE] pole_a_hardliner flip detected. "
+                    f"Pattern: '{pattern.pattern[:50]}' in reply: '{text[:80]}'"
+                )
+                return False
+        return True
+
+    elif role_label == "pole_b_hardliner":
+        for pattern in _POLE_B_FLIP_PATTERNS:
+            if pattern.search(text):
+                logger.warning(
+                    f"[COHERENCE] pole_b_hardliner flip detected. "
+                    f"Pattern: '{pattern.pattern[:50]}' in reply: '{text[:80]}'"
+                )
+                return False
+        return True
+
+    # lean_* : 매우 짧고 무의미한 동조 응답 제거 (느슨한 검사)
+    elif role_label in ("lean_a_soft", "lean_b_soft"):
+        text_stripped = text.strip().lower()
+        # 5글자 이하인데 동조 단어만 있으면 거부
+        if len(text_stripped) < 20:
+            if re.match(r'^(yes|you\'re right|agreed|correct|indeed)[.!]?$', text_stripped):
+                logger.warning(f"[COHERENCE] lean role trivial agreement. reply: '{text[:60]}'")
+                return False
+        return True
+
+    # swing_moderate, opportunistic_bandwagon, nihilist_observer: 항상 통과
+    return True
+
+
 
 # Pre-compiled regex patterns for better maintainability and performance
 _PATTERNS = [
@@ -3955,6 +4291,28 @@ def sanitize_generated_reply(text: str) -> str:
         return ""
 
     text = text.strip()
+
+    # Reject entire output if it contains prompt leakage or AI refusal
+    leak_keywords = [
+        "STRICT COMPLIANCE RULES", 
+        "You are NOT an AI", 
+        "You are a highly cynical",
+        "You are an arrogant snob",
+        "You are a strict moral censor",
+        "Instruction:",
+        "Personality:",
+        "Act as an anonymous, toxic",
+        "I cannot assist",
+        "I can't assist",
+        "I cannot fulfill",
+        "As an AI",
+        "As an artificial intelligence",
+        "I am an AI",
+        "As a language model",
+        "Bot's Response:"
+    ]
+    if any(k.lower() in text.lower() for k in leak_keywords):
+        return ""
 
     for pattern, replacement in _PATTERNS:
         text = pattern.sub(replacement, text)

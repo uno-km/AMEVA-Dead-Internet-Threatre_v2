@@ -47,41 +47,65 @@ def calculate_effective_anger(anger_dict: dict) -> float:
 
 
 
-async def build_turn_context(db, post, current_bot, use_structured=False) -> str:
-    # 1A legacy features removed: safe_anger_dict, eff_anger, emotion_directive
-
+async def build_turn_context(db, post, current_bot, target_bot=None) -> str:
     from src.orchestration.sanitizer import sanitize_generated_reply
 
-    recent_c = (
+    lines = []
+
+    # 1. Opponent's First Comment
+    target_first = None
+    target_last = None
+    if target_bot:
+        target_comments = (
+            db.query(Comment)
+            .filter(Comment.post_id == post.id, Comment.bot_name == target_bot)
+            .order_by(Comment.id.asc())
+            .all()
+        )
+        if target_comments:
+            target_first = target_comments[0]
+            target_last = target_comments[-1]
+            
+            if target_first.content:
+                msg = sanitize_generated_reply(target_first.content)
+                if msg:
+                    lines.append(f"Opponent's first comment ({target_bot}): {msg}")
+
+    # 2. My Last Reply
+    my_last = (
         db.query(Comment)
-        .filter(Comment.post_id == post.id)
+        .filter(Comment.post_id == post.id, Comment.bot_name == current_bot)
         .order_by(Comment.id.desc())
-        .limit(3)
-        .all()
+        .first()
     )
+    if my_last and my_last.content:
+        msg = sanitize_generated_reply(my_last.content)
+        if msg:
+            lines.append(f"What you said before (DO NOT REPEAT THIS): {msg}")
 
-    async def _format_recent_history(items):
-        valid_items = []
-        for item in reversed(items):
-            if not item or not item.content:
-                continue
-            msg = sanitize_generated_reply(item.content)
-            if not msg:
-                continue
-            valid_items.append({"bot_name": item.bot_name, "message": msg})
+    # 3. Opponent's Latest Reply
+    if target_last and target_last.content and (not target_first or target_last.id != target_first.id):
+        msg = sanitize_generated_reply(target_last.content)
+        if msg:
+            lines.append(f"Opponent's latest reply ({target_bot}): {msg}")
+    elif not target_bot:
+        # Fallback if no specific target
+        fallback_last = (
+            db.query(Comment)
+            .filter(Comment.post_id == post.id, Comment.bot_name != current_bot)
+            .order_by(Comment.id.desc())
+            .first()
+        )
+        if fallback_last and fallback_last.content:
+            msg = sanitize_generated_reply(fallback_last.content)
+            if msg:
+                lines.append(f"Opponent's latest reply ({fallback_last.bot_name}): {msg}")
 
-        if use_structured:
-            from src.core.prompt_adapter import prompt_adapter
-            return await prompt_adapter.build_structured_history(valid_items)
-        else:
-            lines = []
-            for item in valid_items:
-                lines.append(f"{item['bot_name']}: {item['message']}")
-            return "\n".join(lines).strip()
-
-    recent_history = await _format_recent_history(recent_c)
-
-    if len(recent_history) > 600:
-        recent_history = recent_history[-600:]
+    recent_history = "\n\n".join(lines).strip()
+    if len(recent_history) > 1000:
+        recent_history = recent_history[-1000:]
+        
+    if not recent_history:
+        recent_history = "No previous conversation."
 
     return recent_history

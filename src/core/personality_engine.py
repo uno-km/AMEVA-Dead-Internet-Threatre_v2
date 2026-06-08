@@ -87,14 +87,31 @@ class PersonalityEngine:
             db.flush()  # flush to get ID without committing
         return state
 
-    def initialize_session_states(self, db: Session, session_id: int):
-        """Pre-initialize agent states with opposing stances to ensure dynamic debate."""
-        bots = ["bot_1", "bot_2", "bot_3"]
-        # Randomly assign Pro (0.8), Con (-0.8), and Neutral/Nuanced (0.0)
-        stances = [0.8, -0.8, 0.0]
-        random.shuffle(stances)
+    def initialize_session_states(self, db: Session, session_id: int, role_triplet: Optional[dict] = None):
+        """
+        Pre-initialize agent states with role-based stance differentiation.
         
-        for i, bot_name in enumerate(bots):
+        Phase 3: role_triplet에서 stance_pole, conviction, flexibility를 opinion_json에 매핑.
+        role_triplet = {"bot_1": {...role profile...}, ...}
+        """
+        import json as _json
+        bots = ["bot_1", "bot_2", "bot_3"]
+
+        for bot_name in bots:
+            # Get role profile for this bot
+            role_profile = (role_triplet or {}).get(bot_name, {})
+            stance_pole = float(role_profile.get("stance_pole", 0.0))
+            conviction = float(role_profile.get("conviction", 0.4))
+            flexibility = float(role_profile.get("flexibility", 0.5))
+            role_label = role_profile.get("role_label", "swing_moderate")
+
+            # role_meta: opportunism + aggression_bias
+            role_meta = {
+                "opportunism": role_profile.get("opportunism", 0.3),
+                "aggression_bias": role_profile.get("aggression_bias", 0.35),
+                "stance_pole_init": stance_pole,
+            }
+
             state = db.query(CurrentAgentState).filter(
                 CurrentAgentState.session_id == session_id,
                 CurrentAgentState.bot_name == bot_name
@@ -103,16 +120,29 @@ class PersonalityEngine:
                 state = CurrentAgentState(
                     session_id=session_id,
                     bot_name=bot_name,
-                    traits_json=json.dumps([0.0] * 22),
-                    states_json=json.dumps([0.0] * 10),
-                    affect_json=json.dumps([0.0, 0.0]),        # [Valence, Arousal]
-                    memory_json=json.dumps([0.0] * 8),
-                    opinion_json=json.dumps([stances[i], 0.0, 0.0, 0.0]),  # Set initial opposing stance
-                    power_json=json.dumps([0.0, 0.0]),          # [SelfAppraisal, SystemicInfluence]
-                    residual_json=json.dumps([0.0] * 16),
-                    event_data_json="{}"
+                    traits_json=_json.dumps([0.0] * 22),
+                    states_json=_json.dumps([0.0] * 10),
+                    affect_json=_json.dumps([0.0, 0.0]),
+                    memory_json=_json.dumps([0.0] * 8),
+                    # opinion[0]=stance_pole, opinion[1]=conviction, opinion[2]=moral_salience, opinion[3]=flexibility
+                    opinion_json=_json.dumps([stance_pole, conviction, 0.0, flexibility]),
+                    power_json=_json.dumps([0.0, 0.0]),
+                    residual_json=_json.dumps([0.0] * 16),
+                    event_data_json="{}",
+                    role_label=role_label,
+                    role_meta_json=_json.dumps(role_meta, ensure_ascii=False),
                 )
                 db.add(state)
+            else:
+                # Update existing state with role info
+                state.opinion_json = _json.dumps([stance_pole, conviction, 0.0, flexibility])
+                state.role_label = role_label
+                state.role_meta_json = _json.dumps(role_meta, ensure_ascii=False)
+
+            logger.info(
+                f"[STANCE_INIT] {bot_name} -> {role_label} "
+                f"(pole={stance_pole:.2f}, conviction={conviction:.2f}, flexibility={flexibility:.2f})"
+            )
         db.flush()
 
 
@@ -260,20 +290,37 @@ class PersonalityEngine:
         new_arousal = self._clip(self._sigmoid_bound(arousal_decay + delta_arousal))
         new_affect = [round(new_valence, 4), round(new_arousal, 4)]
 
-        # --- Opinion Update (Stance, Gap, Moral, ...) ---
-        # Inertia-based decay with event perturbation
+        # --- Opinion Update ---
+        # opinion[0] = stance_pole, opinion[1] = conviction, opinion[2] = moral_salience, opinion[3] = flexibility
+        # Phase 3: conviction이 높을수록 drift 저항, flexibility가 높을수록 허용폭 증가
+        conviction_val = opinion[1] if len(opinion) > 1 else 0.4
+        flexibility_val = opinion[3] if len(opinion) > 3 else 0.5
+
+        # Resistance factor: conviction 높을수록 강하게 저항, flexibility 높을수록 완화
+        drift_resistance = self._clip_01(conviction_val * (1.0 - flexibility_val * 0.5))
+
         new_opinion = []
         for i, o in enumerate(opinion):
-            # Stance (index 0): shift slightly based on engagement
-            if i == 0:
+            if i == 0:  # stance_pole
                 stance_delta = 0.0
                 if "AGREE" in events:
-                    stance_delta += 0.05  # reinforces current stance
+                    stance_delta += 0.04 * (1.0 - drift_resistance)  # reinforces current stance slightly
                 if "DISAGREE" in events:
-                    stance_delta -= 0.03  # slight doubt
+                    stance_delta -= 0.02 * (1.0 - drift_resistance)  # slight doubt, damped by conviction
                 if "CONCEDE" in events:
-                    stance_delta -= 0.08  # significant doubt
-                new_opinion.append(self._clip(o * 0.98 + stance_delta))
+                    stance_delta -= 0.06 * (1.0 - drift_resistance)  # significant doubt, damped by conviction
+                # Decay: conviction이 높으면 원래 위치로 복원 경향
+                inertia = 0.99 - (0.01 * flexibility_val)  # high flex → more decay
+                new_opinion.append(self._clip(o * inertia + stance_delta))
+            elif i == 1:  # conviction — slowly erodes under sustained attack
+                conv_delta = 0.0
+                if "ATTACK" in events:
+                    conv_delta -= 0.01 * intensity
+                if "AGREE" in events:
+                    conv_delta += 0.01
+                new_opinion.append(self._clip_01(o * 0.995 + conv_delta))
+            elif i == 3:  # flexibility — mostly stable, can shift slightly
+                new_opinion.append(self._clip_01(o * 0.999))
             else:
                 new_opinion.append(self._clip(o * 0.98))
 
@@ -408,10 +455,12 @@ class PersonalityEngine:
             opinion_json=agent.opinion_json,
             power_json=agent.power_json,
             residual_json=agent.residual_json,
-            event_data_json=event_str
+            event_data_json=event_str,
+            role_label=getattr(agent, "role_label", "swing_moderate"),  # Phase 3
         )
         db.add(snap)
         # NO db.commit() here — batched in update_fast_state()
+
 
     # Legacy public alias (backward compat for walkthrough references)
     def snapshot(self, db: Session, session_id: int, turn_index: int, agent: CurrentAgentState):

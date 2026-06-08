@@ -16,6 +16,8 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from src.db.database import SessionLocal
 from src.db.models import Session, Post, Comment, BotState, SessionBotState
+from src.db.models import CurrentAgentState  # Phase 3: role_meta loading
+
 from src.core.llm_client import LLMClient
 from src.core.persona import PersonaManager
 from src.core.event_extractor import extract_events
@@ -617,8 +619,12 @@ async def run_session():
         db.commit()
         db.refresh(session)
 
-        # Pre-initialize agent states with opposing stances to ensure dynamic debate
-        personality_engine.initialize_session_states(db, session.id)
+        # Phase 3: Assign initial role triplet (pole_a + pole_b + third_role)
+        from src.core.stance_roles import assign_initial_role_triplet
+        role_triplet = assign_initial_role_triplet()
+
+        # Pre-initialize agent states with role-based stance differentiation
+        personality_engine.initialize_session_states(db, session.id, role_triplet)
 
         state_manager.current_session_id = session.id
         post = await create_post_with_main_llm(db, session)
@@ -780,9 +786,9 @@ async def generate_relay_reply(
         db, post.session_id, current_bot, turn_index=turn_idx, event_data=event_data
     )
 
-    # Build turn context (recent history only)
+    # Build turn context (targeted history)
     recent_history = await build_turn_context(
-        db, post, current_bot, use_structured=LPDE_STRUCTURED_HISTORY
+        db, post, current_bot, target_bot=last_speaker
     )
     
     # Phase 2A: Director hint is now a static helper for 1.8B models
@@ -835,6 +841,22 @@ async def generate_relay_reply(
         from src.core.event_extractor import _extract_claim_snippet
         claim_snippet = _extract_claim_snippet(last_comment_text)
 
+    # Phase 3: Load role_meta from CurrentAgentState for role orientation in prompt
+    import json as _json
+    _cas = db.query(CurrentAgentState).filter(
+        CurrentAgentState.session_id == post.session_id,
+        CurrentAgentState.bot_name == current_bot
+    ).first()
+    role_meta = None
+    if _cas and _cas.role_meta_json:
+        try:
+            _rm = _json.loads(_cas.role_meta_json)
+            if _rm:  # non-empty
+                role_label = getattr(_cas, "role_label", "swing_moderate")
+                role_meta = {**_rm, "role_label": role_label}
+        except Exception:
+            pass
+
     prompt = prompt_adapter.build_prompt(
         current_bot=current_bot,
         persona=persona,
@@ -846,7 +868,9 @@ async def generate_relay_reply(
         claim_snippet=claim_snippet,
         counter_arg_enabled=LPDE_COUNTER_ARG,
         god_directive=god_directive,
+        role_meta=role_meta,
     )
+
 
     reply_content = await bot_client.generate_completion(
         persona, 
@@ -864,7 +888,17 @@ async def generate_relay_reply(
         ]
     )
     reply_content = sanitize_generated_reply(reply_content)
+
+    # Phase 3: Stance coherence check for hardliner roles
+    if reply_content and role_meta:
+        from src.orchestration.sanitizer import validate_stance_coherence
+        _role_label_check = role_meta.get("role_label", "swing_moderate")
+        if not validate_stance_coherence(reply_content, _role_label_check):
+            logger.warning(f"[COHERENCE FAIL] {current_bot} ({_role_label_check}): stance flip detected, using fallback.")
+            reply_content = ""  # trigger enforce_fallback
+
     reply_content = enforce_fallback(reply_content, current_bot)
+
     reply_content, mentioned = force_single_mention(reply_content, current_bot)
 
     return reply_content, mentioned
@@ -947,15 +981,28 @@ def save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, 
     return c
 
 def save_session_bot_state(db, session_id: int, turn_idx: int):
+    """Snapshot bot states per turn — including Phase 3 role info for restart restoration."""
+    from src.db.models import CurrentAgentState as _CAS
+    import json as _json
     states = db.query(BotState).all()
     for s in states:
+        # Try to get role info from CurrentAgentState
+        cas = db.query(_CAS).filter(
+            _CAS.session_id == session_id,
+            _CAS.bot_name == s.bot_name
+        ).first()
+        role_label = getattr(cas, "role_label", "swing_moderate") if cas else "swing_moderate"
+        role_meta_json = getattr(cas, "role_meta_json", "{}") if cas else "{}"
+
         record = SessionBotState(
             session_id=session_id,
             turn_index=turn_idx,
             bot_name=s.bot_name,
             persona=s.persona,
             current_directive=s.current_directive,
-            anger_targets=s.anger_targets
+            anger_targets=s.anger_targets,
+            role_label=role_label,
+            role_meta_json=role_meta_json,
         )
         db.add(record)
     db.commit()
@@ -1166,7 +1213,7 @@ async def restart_session(session_id: int):
         latest_state = db.query(SessionBotState).filter(SessionBotState.session_id == session_id).order_by(SessionBotState.turn_index.desc()).first()
         max_turn_idx = (latest_state.turn_index + 1) if latest_state else 0
 
-        # Restore states
+        # Restore legacy bot states from last saved SessionBotState
         for bot_name in ["bot_1", "bot_2", "bot_3"]:
             st = db.query(SessionBotState).filter(SessionBotState.session_id == session_id, SessionBotState.bot_name == bot_name).order_by(SessionBotState.turn_index.desc()).first()
             if st:
@@ -1178,9 +1225,21 @@ async def restart_session(session_id: int):
                 bs.current_directive = st.current_directive
                 bs.anger_targets = st.anger_targets
 
+                # Phase 3: Restore role disposition into CurrentAgentState (B안: 복원 보장)
+                if st.role_label and st.role_label != "swing_moderate":
+                    cas = db.query(CurrentAgentState).filter(
+                        CurrentAgentState.session_id == session_id,
+                        CurrentAgentState.bot_name == bot_name
+                    ).first()
+                    if cas:
+                        cas.role_label = st.role_label
+                        cas.role_meta_json = getattr(st, "role_meta_json", "{}")
+                        logger.info(f"[RESTART] Restored role for {bot_name}: {st.role_label}")
+
         db.commit()
 
         logger.info(f"[ORCHESTRATOR] Restarting session {session_id} from turn {max_turn_idx}")
+
         
         bot_targets = [
             ("ameva-llm-bot-1", 8102),

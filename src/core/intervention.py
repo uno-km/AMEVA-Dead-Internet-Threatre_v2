@@ -56,6 +56,7 @@ async def generate_intervention_json(
     prompt = (
         f"[Debate Director Intervention]\n"
         f"Target bot: {bot_name}\n"
+        f"Current state: {json.dumps(current_state)}\n"
         f"Current arousal level: {arousal:.2f} (scale: -1 to 1)\n"
         f"Recent conversation:\n{recent_history[:400] if recent_history else 'None'}\n\n"
         f"You are the debate director. Decide whether to intervene.\n"
@@ -72,6 +73,7 @@ async def generate_intervention_json(
             "You are a debate director that outputs JSON intervention commands.",
             prompt,
             max_tokens=120,
+            response_format={"type": "json_object"}
         )
         return parse_intervention_json(result)
     except Exception as e:

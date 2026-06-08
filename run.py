@@ -192,6 +192,12 @@ async def get_bot_inspector_summary(
         except:
             return []
 
+    def safe_load_dict(val):
+        try:
+            return json.loads(val) if val else {}
+        except:
+            return {}
+
     # Deltas
     snapshots = db.query(AgentStateSnapshot).filter(
         AgentStateSnapshot.session_id == session_id,
@@ -226,8 +232,12 @@ async def get_bot_inspector_summary(
         return {
             "bot_name": bot_name,
             "session_id": session_id,
-            "phase": "LPDE_Phase_2",
+            "phase": "LPDE_Phase_3",
             "active_dims": ["affect", "opinion", "power"],
+            "role_label": "swing_moderate",
+            "role_meta": {},
+            "conviction": None,
+            "flexibility": None,
             "message": "No LPDE state yet for this session",
             "legacy_state": {
                 "persona": persona,
@@ -240,22 +250,29 @@ async def get_bot_inspector_summary(
             "deltas": {"affect": [], "opinion": [], "power": []}
         }
 
+    # opinion_json 차원 정의 (Phase 3):
+    # opinion[0] = stance_pole, opinion[1] = conviction, opinion[2] = moral_salience, opinion[3] = flexibility
     lpde_tensors = {
         "affect": safe_load(current_state.affect_json),
         "opinion": safe_load(current_state.opinion_json),
         "power": safe_load(current_state.power_json)
     }
+    opinion_vec = lpde_tensors["opinion"]
 
     from src.core.personality_engine import personality_engine
-    
     relation_summary = personality_engine.get_edges_for_bot(db, session_id, bot_name)
 
     return {
         "bot_name": bot_name,
         "session_id": session_id,
         "updated_at": current_state.updated_at.strftime("%Y-%m-%d %H:%M:%S") if current_state.updated_at else None,
-        "phase": "LPDE_Phase_2",
+        "phase": "LPDE_Phase_3",
         "active_dims": ["affect", "opinion", "power"],
+        # Phase 3: role info
+        "role_label": getattr(current_state, "role_label", "swing_moderate"),
+        "role_meta": safe_load_dict(getattr(current_state, "role_meta_json", "{}")),
+        "conviction": opinion_vec[1] if len(opinion_vec) > 1 else None,
+        "flexibility": opinion_vec[3] if len(opinion_vec) > 3 else None,
         "legacy_state": {
             "persona": persona,
             "current_directive": current_directive,
@@ -311,6 +328,8 @@ async def get_bot_inspector_detail(
         }
 
     # Time series (reverse order so oldest first)
+    # opinion 차원: [stance_pole, conviction, moral_salience, flexibility]
+    # trajectory 좌표 표준: x=stance_pole, y=conviction, z=flexibility
     snapshots = db.query(AgentStateSnapshot).filter(
         AgentStateSnapshot.session_id == session_id,
         AgentStateSnapshot.bot_name == bot_name
@@ -319,11 +338,17 @@ async def get_bot_inspector_detail(
     time_series = []
     recent_events = []
     for snap in reversed(snapshots):
+        opinion_vec = safe_load(snap.opinion_json)
         time_series.append({
             "turn_index": snap.turn_index,
             "affect": safe_load(snap.affect_json),
-            "opinion": safe_load(snap.opinion_json),
-            "power": safe_load(snap.power_json)
+            "opinion": opinion_vec,
+            "power": safe_load(snap.power_json),
+            "role_label": getattr(snap, "role_label", "swing_moderate"),
+            # Phase 3 trajectory coords (standardized axes)
+            "x": opinion_vec[0] if len(opinion_vec) > 0 else 0.0,  # stance_pole
+            "y": opinion_vec[1] if len(opinion_vec) > 1 else 0.0,  # conviction
+            "z": opinion_vec[3] if len(opinion_vec) > 3 else 0.0,  # flexibility
         })
         
         event_data = safe_load_dict(snap.event_data_json)
@@ -432,6 +457,63 @@ async def control_restart(post_id: int, db: DbSession = Depends(get_db)):
     state_manager.set_state(SystemState.RUNNING)
     asyncio.create_task(restart_session(session_id))
     return {"message": f"Restarting post {post_id} (Session {session_id})"}
+
+@app.get("/api/lpde/bot/{bot_name}/trajectory")
+async def get_bot_trajectory(
+    bot_name: str,
+    session_id: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: DbSession = Depends(get_db)
+):
+    """
+    Phase 3: 봇의 3D 입장 궤적(trajectory)을 반환.
+    
+    좌표 표준 (3D 시각화 Three.js 연동 대비):
+      x = stance_pole   : opinion[0], 논쟁 축 방향 [-1.0 ~ +1.0]
+      y = conviction    : opinion[1], 입장 확신도 [0.0 ~ 1.0]
+      z = flexibility   : opinion[3], 유연성 [0.0 ~ 1.0]
+    """
+    import json
+    from src.db.models import Session, AgentStateSnapshot
+
+    if session_id is None:
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        session_id = latest_session.id if latest_session else None
+
+    def safe_load(val):
+        try:
+            return json.loads(val) if val else []
+        except:
+            return []
+
+    snapshots = db.query(AgentStateSnapshot).filter(
+        AgentStateSnapshot.session_id == session_id,
+        AgentStateSnapshot.bot_name == bot_name
+    ).order_by(AgentStateSnapshot.turn_index.asc()).limit(limit).all()
+
+    points = []
+    for snap in snapshots:
+        opinion_vec = safe_load(snap.opinion_json)
+        affect_vec = safe_load(snap.affect_json)
+        points.append({
+            "turn_index": snap.turn_index,
+            "x": opinion_vec[0] if len(opinion_vec) > 0 else 0.0,   # stance_pole
+            "y": opinion_vec[1] if len(opinion_vec) > 1 else 0.0,   # conviction
+            "z": opinion_vec[3] if len(opinion_vec) > 3 else 0.0,   # flexibility
+            "arousal": affect_vec[1] if len(affect_vec) > 1 else 0.0,
+            "role_label": getattr(snap, "role_label", "swing_moderate"),
+        })
+
+    return {
+        "bot_name": bot_name,
+        "session_id": session_id,
+        "axis_definition": {
+            "x": "stance_pole [-1.0 ~ +1.0]",
+            "y": "conviction [0.0 ~ 1.0]",
+            "z": "flexibility [0.0 ~ 1.0]"
+        },
+        "points": points
+    }
 
 if __name__ == "__main__":
     import uvicorn

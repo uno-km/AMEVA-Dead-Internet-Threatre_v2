@@ -13,9 +13,33 @@ let currentPostId = null;
         let radarChartInstance = null;
         let arousalChartInstance = null;
         let stanceChartInstance = null;
+        let convictionChartInstance = null;  // Phase 3
 
         let lastSummaryData = null;
         let lastDetailData = null;
+
+        // =====================================================================
+        // Phase 3: Comparison Panel State
+        // =====================================================================
+        let compStanceChartInstance = null;
+        let compConvictionChartInstance = null;
+        let compArousalChartInstance = null;
+        let compTrajectoryData = {};  // {bot_1: [...points], bot_2: [...], bot_3: [...]}
+        let allTurnIndices = [];
+
+        const ROLE_LABEL_MAP = {
+            "pole_a_hardliner":        { label: "Pole A Hardliner", cssClass: "role-pole-a", emoji: "🔴" },
+            "pole_b_hardliner":        { label: "Pole B Hardliner", cssClass: "role-pole-b", emoji: "🔵" },
+            "swing_moderate":          { label: "Swing Moderate",   cssClass: "role-swing",  emoji: "🟢" },
+            "lean_a_soft":             { label: "Lean A Soft",      cssClass: "role-lean",   emoji: "🟡" },
+            "lean_b_soft":             { label: "Lean B Soft",      cssClass: "role-lean",   emoji: "🟡" },
+            "opportunistic_bandwagon": { label: "Opportunist",      cssClass: "role-opport", emoji: "🟣" },
+            "nihilist_observer":       { label: "Nihilist",         cssClass: "role-nihil",  emoji: "⚪" },
+        };
+
+        function getRoleInfo(role_label) {
+            return ROLE_LABEL_MAP[role_label] || { label: role_label, cssClass: "role-nihil", emoji: "⚫" };
+        }
 
         // --- Fetch System Status ---
         async function fetchSystemStatus() {
@@ -240,7 +264,7 @@ let currentPostId = null;
             }, 1000);
         }
 
-        // --- Bot Inspector Logic ---
+        // --- Bot Inspector Logic (단일 봇) ---
 
         function toggleAutoRefresh() {
             inspectorAutoRefresh = document.getElementById('inspector-auto-refresh').checked;
@@ -302,6 +326,20 @@ let currentPostId = null;
                 if (currentVal) {
                     select.value = currentVal;
                 }
+
+                // Also populate comparison panel session select
+                const compSelect = document.getElementById('comparison-session-select');
+                if (compSelect) {
+                    const compVal = compSelect.value;
+                    compSelect.innerHTML = '<option value="">Latest Session</option>';
+                    sessions.forEach(s => {
+                        const opt = document.createElement('option');
+                        opt.value = s.id;
+                        opt.innerText = `Session #${s.id} (${s.status})`;
+                        compSelect.appendChild(opt);
+                    });
+                    if (compVal) compSelect.value = compVal;
+                }
             } catch (err) {
                 console.error("Failed to fetch sessions:", err);
             }
@@ -323,7 +361,6 @@ let currentPostId = null;
         async function fetchInspectorCycle() {
             if (!inspectorOpenBot) return;
 
-            // Determine if we should poll
             const isTabVisible = !document.hidden;
             const globalState = systemStatusMap["global_state"] || "UNKNOWN";
             const isRunning = globalState === "RUNNING";
@@ -333,7 +370,6 @@ let currentPostId = null;
                     const sessionSelect = document.getElementById('inspector-session-select').value;
                     let baseQuery = sessionSelect ? `?session_id=${sessionSelect}` : '';
 
-                    // 1. Fetch & Render Summary (Lightweight)
                     const resSum = await fetch(`/api/lpde/bot/${inspectorOpenBot}/summary${baseQuery}`);
                     const summaryData = await resSum.json();
                     
@@ -344,8 +380,6 @@ let currentPostId = null;
                         renderSummary(summaryData);
                     }
 
-                    // 2. Deferred Fetch & Render Detail (Heavy)
-                    // If summary tells us we don't even have LPDE state, skip detail
                     if (summaryData.message !== "No LPDE state yet for this session") {
                         let detailQuery = sessionSelect ? `?session_id=${sessionSelect}&limit=50` : '?limit=50';
                         const resDet = await fetch(`/api/lpde/bot/${inspectorOpenBot}/detail${detailQuery}`);
@@ -364,16 +398,14 @@ let currentPostId = null;
                 }
             }
 
-            // Schedule next poll adaptively
-            let delay = 10000; // Slow polling if paused/hidden
+            let delay = 10000;
             if (isTabVisible && isRunning) {
-                delay = 2500; // Fast polling
+                delay = 2500;
             }
             inspectorPollTimer = setTimeout(fetchInspectorCycle, delay);
         }
 
         function renderSummary(data) {
-            // Update Empty state
             const emptyEl = document.getElementById('inspector-empty-msg');
             if (data.message === "No LPDE state yet for this session") {
                 emptyEl.classList.remove('hidden');
@@ -382,10 +414,20 @@ let currentPostId = null;
                 emptyEl.classList.add('hidden');
             }
 
-            // Update Header
             document.getElementById('inspector-phase').innerText = `Phase: ${data.phase || 'Unknown'}`;
             document.getElementById('inspector-persona').innerText = (data.legacy_state && data.legacy_state.persona) || 'None';
             document.getElementById('inspector-directive').innerText = (data.legacy_state && data.legacy_state.current_directive) || 'None';
+
+            // Phase 3: Role Badge
+            const roleBadge = document.getElementById('inspector-role-badge');
+            if (data.role_label) {
+                const roleInfo = getRoleInfo(data.role_label);
+                roleBadge.textContent = `${roleInfo.emoji} ${roleInfo.label}`;
+                roleBadge.className = `text-xs font-bold px-2 py-0.5 rounded border ${roleInfo.cssClass}`;
+                roleBadge.style.display = 'inline-block';
+            } else {
+                roleBadge.style.display = 'none';
+            }
 
             const activeDims = data.active_dims || [];
             const isAffectActive = activeDims.includes('affect');
@@ -423,32 +465,32 @@ let currentPostId = null;
                 </div>`;
             }
 
+            // Phase 3: opinion 차원 재정의 레이블
             const chipsHtml = `
                 ${buildChip('Valence', t.affect, d.affect, 0, isAffectActive)}
                 ${buildChip('Arousal', t.affect, d.affect, 1, isAffectActive)}
-                ${buildChip('Stance', t.opinion, d.opinion, 0, isOpinionActive)}
-                ${buildChip('Moral Salience', t.opinion, d.opinion, 1, isOpinionActive)}
+                ${buildChip('Stance Pole', t.opinion, d.opinion, 0, isOpinionActive)}
+                ${buildChip('Conviction', t.opinion, d.opinion, 1, isOpinionActive)}
                 ${buildChip('Self Appraisal', t.power, d.power, 0, isPowerActive)}
                 ${buildChip('Sys. Influence', t.power, d.power, 1, isPowerActive)}
             `;
             document.getElementById('inspector-summary-chips').innerHTML = chipsHtml;
 
-            // Radar Chart with null support for inactive axes
             const rValence = isAffectActive ? (getSafeVal(t.affect, 0) || 0) : null;
             const rArousal = isAffectActive ? (getSafeVal(t.affect, 1) || 0) : null;
             const rStance = isOpinionActive ? (getSafeVal(t.opinion, 0) || 0) : null;
-            const rMoral = isOpinionActive ? (getSafeVal(t.opinion, 1) || 0) : null;
+            const rConviction = isOpinionActive ? (getSafeVal(t.opinion, 1) || 0) : null;
             const rSelf = isPowerActive ? (getSafeVal(t.power, 0) || 0) : null;
             const rSys = isPowerActive ? (getSafeVal(t.power, 1) || 0) : null;
 
-            const radarData = [rValence, rArousal, rStance, rMoral, rSelf, rSys];
+            const radarData = [rValence, rArousal, rStance, rConviction, rSelf, rSys];
 
             if (!radarChartInstance) {
                 const ctxR = document.getElementById('radarChart').getContext('2d');
                 radarChartInstance = new Chart(ctxR, {
                     type: 'radar',
                     data: {
-                        labels: ['Valence', 'Arousal', 'Stance', 'Moral Sal.', 'Self Appr.', 'Sys. Infl.'],
+                        labels: ['Valence', 'Arousal', 'Stance Pole', 'Conviction', 'Self Appr.', 'Sys. Infl.'],
                         datasets: [{
                             label: 'Current State',
                             data: radarData,
@@ -456,9 +498,7 @@ let currentPostId = null;
                             borderColor: 'rgba(99, 102, 241, 1)',
                             pointBackgroundColor: 'rgba(99, 102, 241, 1)',
                             pointBorderColor: '#fff',
-                            pointHoverBackgroundColor: '#fff',
-                            pointHoverBorderColor: 'rgba(99, 102, 241, 1)',
-                            spanGaps: false // Will not draw line over nulls
+                            spanGaps: false
                         }]
                     },
                     options: {
@@ -483,7 +523,7 @@ let currentPostId = null;
                 });
             } else {
                 radarChartInstance.data.datasets[0].data = radarData;
-                radarChartInstance.update('none'); // Update without animation for smooth polling
+                radarChartInstance.update('none');
             }
         }
 
@@ -493,6 +533,7 @@ let currentPostId = null;
             const labels = data.time_series.map(s => `T${s.turn_index}`);
             const arousalData = data.time_series.map(s => getSafeVal(s.affect, 1) || 0);
             const stanceData = data.time_series.map(s => getSafeVal(s.opinion, 0) || 0);
+            const convictionData = data.time_series.map(s => getSafeVal(s.opinion, 1) || 0);
 
             // Primary: Arousal
             if (!arousalChartInstance) {
@@ -506,17 +547,14 @@ let currentPostId = null;
                             data: arousalData,
                             borderColor: 'rgb(239, 68, 68)',
                             backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                            fill: true,
-                            tension: 0.3,
-                            borderWidth: 2,
-                            pointRadius: 2
+                            fill: true, tension: 0.3, borderWidth: 2, pointRadius: 2
                         }]
                     },
                     options: {
                         responsive: true,
                         scales: { y: { min: -1, max: 1 } },
                         plugins: { legend: { display: false } },
-                        animation: { duration: 0 } // No animation for smooth polling
+                        animation: { duration: 0 }
                     }
                 });
             } else {
@@ -525,7 +563,7 @@ let currentPostId = null;
                 arousalChartInstance.update('none');
             }
 
-            // Secondary: Stance
+            // Stance Pole
             if (!stanceChartInstance) {
                 const ctxS = document.getElementById('stanceChart').getContext('2d');
                 stanceChartInstance = new Chart(ctxS, {
@@ -533,14 +571,11 @@ let currentPostId = null;
                     data: {
                         labels: labels,
                         datasets: [{
-                            label: 'Stance',
+                            label: 'Stance Pole',
                             data: stanceData,
                             borderColor: 'rgb(59, 130, 246)',
                             backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                            fill: true,
-                            tension: 0.3,
-                            borderWidth: 2,
-                            pointRadius: 2
+                            fill: true, tension: 0.3, borderWidth: 2, pointRadius: 2
                         }]
                     },
                     options: {
@@ -554,6 +589,34 @@ let currentPostId = null;
                 stanceChartInstance.data.labels = labels;
                 stanceChartInstance.data.datasets[0].data = stanceData;
                 stanceChartInstance.update('none');
+            }
+
+            // Phase 3: Conviction
+            if (!convictionChartInstance) {
+                const ctxC = document.getElementById('convictionChart').getContext('2d');
+                convictionChartInstance = new Chart(ctxC, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Conviction',
+                            data: convictionData,
+                            borderColor: 'rgb(168, 85, 247)',
+                            backgroundColor: 'rgba(168, 85, 247, 0.1)',
+                            fill: true, tension: 0.3, borderWidth: 2, pointRadius: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: { y: { min: 0, max: 1 } },
+                        plugins: { legend: { display: false } },
+                        animation: { duration: 0 }
+                    }
+                });
+            } else {
+                convictionChartInstance.data.labels = labels;
+                convictionChartInstance.data.datasets[0].data = convictionData;
+                convictionChartInstance.update('none');
             }
 
             // Edges Table
@@ -618,6 +681,203 @@ let currentPostId = null;
                     evtContainer.innerHTML = evtHtml;
                 }
             }
+        }
+
+        // =====================================================================
+        // Phase 3: 3-Bot Comparison Panel
+        // =====================================================================
+
+        function openComparison() {
+            document.getElementById('comparison-overlay').classList.remove('hidden');
+            document.getElementById('comparison-panel').classList.remove('hidden');
+            fetchSessionsList();
+            loadComparisonData();
+        }
+
+        function closeComparison() {
+            document.getElementById('comparison-overlay').classList.add('hidden');
+            document.getElementById('comparison-panel').classList.add('hidden');
+        }
+
+        function switchComparisonTab(tab, btn) {
+            // Hide all panels
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.remove('active');
+                b.classList.add('text-gray-500', 'bg-gray-50');
+            });
+            // Show selected
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            btn.classList.add('active');
+            btn.classList.remove('text-gray-500', 'bg-gray-50');
+        }
+
+        async function loadComparisonData() {
+            const sessionSelect = document.getElementById('comparison-session-select').value;
+            const query = sessionSelect ? `?session_id=${sessionSelect}` : '';
+            const bots = ['bot_1', 'bot_2', 'bot_3'];
+
+            compTrajectoryData = {};
+            let summaryByBot = {};
+
+            // Fetch trajectory + summary for each bot
+            for (const bot of bots) {
+                try {
+                    const [trajRes, sumRes] = await Promise.all([
+                        fetch(`/api/lpde/bot/${bot}/trajectory${query}&limit=200`),
+                        fetch(`/api/lpde/bot/${bot}/summary${query}`)
+                    ]);
+                    compTrajectoryData[bot] = (await trajRes.json()).points || [];
+                    summaryByBot[bot] = await sumRes.json();
+                } catch(e) {
+                    compTrajectoryData[bot] = [];
+                    summaryByBot[bot] = {};
+                }
+            }
+
+            // Role badges
+            const badgesContainer = document.getElementById('comparison-role-badges');
+            const botColors = { bot_1: '#a855f7', bot_2: '#ec4899', bot_3: '#22c55e' };
+            badgesContainer.innerHTML = bots.map(bot => {
+                const roleLabel = summaryByBot[bot].role_label || 'swing_moderate';
+                const roleInfo = getRoleInfo(roleLabel);
+                const conviction = summaryByBot[bot].conviction;
+                const flexibility = summaryByBot[bot].flexibility;
+                const convStr = conviction !== null && conviction !== undefined ? conviction.toFixed(2) : '—';
+                const flexStr = flexibility !== null && flexibility !== undefined ? flexibility.toFixed(2) : '—';
+                return `
+                    <div class="flex items-center gap-2 bg-white rounded-xl px-3 py-2 border shadow-sm">
+                        <span class="w-3 h-3 rounded-full" style="background:${botColors[bot]}"></span>
+                        <span class="font-bold text-xs">${bot.toUpperCase()}</span>
+                        <span class="text-xs px-2 py-0.5 rounded border font-bold ${roleInfo.cssClass}">${roleInfo.emoji} ${roleInfo.label}</span>
+                        <span class="text-[10px] text-gray-500">conv: ${convStr} / flex: ${flexStr}</span>
+                    </div>
+                `;
+            }).join('');
+
+            // Compute unified turn labels
+            const allTurns = new Set();
+            for (const bot of bots) {
+                (compTrajectoryData[bot] || []).forEach(p => allTurns.add(p.turn_index));
+            }
+            allTurnIndices = Array.from(allTurns).sort((a,b)=>a-b);
+
+            // Update slider
+            const slider = document.getElementById('turn-slider');
+            slider.min = 0;
+            slider.max = Math.max(0, allTurnIndices.length - 1);
+            slider.value = slider.max;
+            onSliderChange(slider.value);
+
+            // Render charts
+            renderComparisonCharts(bots, botColors);
+        }
+
+        function getValAtTurn(botData, turnIndex, axis) {
+            const pt = botData.find(p => p.turn_index === turnIndex);
+            if (!pt) return null;
+            if (axis === 'x') return pt.x;
+            if (axis === 'y') return pt.y;
+            if (axis === 'arousal') return pt.arousal;
+            return null;
+        }
+
+        function renderComparisonCharts(bots, botColors) {
+            const labels = allTurnIndices.map(t => `T${t}`);
+
+            function buildDataset(bot, axis) {
+                return {
+                    label: bot,
+                    data: allTurnIndices.map(t => getValAtTurn(compTrajectoryData[bot] || [], t, axis)),
+                    borderColor: botColors[bot],
+                    backgroundColor: botColors[bot] + '22',
+                    fill: false, tension: 0.3, borderWidth: 2, pointRadius: 2,
+                    spanGaps: true,
+                };
+            }
+
+            const commonOpts = (yMin, yMax) => ({
+                responsive: true,
+                scales: { y: { min: yMin, max: yMax } },
+                plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 10 } } } },
+                animation: { duration: 0 }
+            });
+
+            // Stance Chart
+            if (!compStanceChartInstance) {
+                const ctx = document.getElementById('compStanceChart').getContext('2d');
+                compStanceChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets: bots.map(b => buildDataset(b, 'x')) },
+                    options: commonOpts(-1, 1)
+                });
+            } else {
+                compStanceChartInstance.data.labels = labels;
+                compStanceChartInstance.data.datasets = bots.map(b => buildDataset(b, 'x'));
+                compStanceChartInstance.update('none');
+            }
+
+            // Conviction Chart
+            if (!compConvictionChartInstance) {
+                const ctx = document.getElementById('compConvictionChart').getContext('2d');
+                compConvictionChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets: bots.map(b => buildDataset(b, 'y')) },
+                    options: commonOpts(0, 1)
+                });
+            } else {
+                compConvictionChartInstance.data.labels = labels;
+                compConvictionChartInstance.data.datasets = bots.map(b => buildDataset(b, 'y'));
+                compConvictionChartInstance.update('none');
+            }
+
+            // Arousal Chart
+            if (!compArousalChartInstance) {
+                const ctx = document.getElementById('compArousalChart').getContext('2d');
+                compArousalChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets: bots.map(b => buildDataset(b, 'arousal')) },
+                    options: commonOpts(-1, 1)
+                });
+            } else {
+                compArousalChartInstance.data.labels = labels;
+                compArousalChartInstance.data.datasets = bots.map(b => buildDataset(b, 'arousal'));
+                compArousalChartInstance.update('none');
+            }
+        }
+
+        function onSliderChange(sliderIdx) {
+            const turnIndex = allTurnIndices[parseInt(sliderIdx)];
+            const label = document.getElementById('slider-turn-label');
+            label.textContent = turnIndex !== undefined ? `Turn: ${turnIndex}` : 'Turn: —';
+
+            if (turnIndex === undefined) return;
+
+            const bots = ['bot_1', 'bot_2', 'bot_3'];
+            const botColors = { bot_1: '#a855f7', bot_2: '#ec4899', bot_3: '#22c55e' };
+            const snapContainer = document.getElementById('slider-snapshot');
+
+            snapContainer.innerHTML = bots.map(bot => {
+                const pt = (compTrajectoryData[bot] || []).find(p => p.turn_index === turnIndex);
+                const roleInfo = pt ? getRoleInfo(pt.role_label || 'swing_moderate') : getRoleInfo('swing_moderate');
+                if (!pt) {
+                    return `<div class="bg-gray-50 rounded-lg p-2 border text-center">
+                        <div class="font-bold text-xs" style="color:${botColors[bot]}">${bot.toUpperCase()}</div>
+                        <div class="text-[10px] text-gray-400 mt-1">No data</div>
+                    </div>`;
+                }
+                return `<div class="bg-white rounded-lg p-2 border shadow-sm">
+                    <div class="font-bold text-xs mb-1 flex items-center gap-1" style="color:${botColors[bot]}">
+                        ${bot.toUpperCase()}
+                        <span class="text-[9px] px-1 rounded border font-bold ${roleInfo.cssClass}">${roleInfo.emoji}</span>
+                    </div>
+                    <div class="text-[10px] text-gray-700 space-y-0.5">
+                        <div>Stance: <b>${pt.x.toFixed(3)}</b></div>
+                        <div>Conv: <b>${pt.y.toFixed(3)}</b></div>
+                        <div>Arousal: <b>${pt.arousal.toFixed(3)}</b></div>
+                    </div>
+                </div>`;
+            }).join('');
         }
 
         // --- Initialization and Global Polling ---

@@ -39,6 +39,38 @@
         /* Toggle Switch CSS */
         input:checked ~ .dot { transform: translateX(100%); }
         input:checked ~ .block { background-color: #4f46e5; }
+
+        /* Role badge colors */
+        .role-pole-a { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
+        .role-pole-b { background: #eff6ff; color: #2563eb; border-color: #93c5fd; }
+        .role-swing  { background: #f0fdf4; color: #16a34a; border-color: #86efac; }
+        .role-lean   { background: #fefce8; color: #ca8a04; border-color: #fde047; }
+        .role-opport { background: #fdf4ff; color: #9333ea; border-color: #d8b4fe; }
+        .role-nihil  { background: #f8fafc; color: #64748b; border-color: #cbd5e1; }
+
+        /* Comparison panel tab */
+        .tab-btn { transition: all 0.2s; }
+        .tab-btn.active { background: #4f46e5; color: white; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        /* Slider range */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 4px;
+            border-radius: 5px;
+            background: #e2e8f0;
+            outline: none;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #4f46e5;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body class="bg-gradient-to-br from-indigo-100 via-purple-100 to-pink-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden">
@@ -78,6 +110,12 @@
                     <!-- Injected by JS -->
                     <div class="text-sm text-gray-400 text-center py-4">로딩중...</div>
                 </div>
+
+                <!-- 3-Bot Comparison Button -->
+                <button onclick="openComparison()" class="mt-4 w-full text-xs font-bold py-2 px-3 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-700 transition-all flex items-center justify-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                    3봇 비교 뷰 열기
+                </button>
             </div>
 
             <!-- Post List -->
@@ -115,7 +153,7 @@
         </main>
     </div>
 
-    <!-- Bot Inspector Drawer -->
+    <!-- Bot Inspector Drawer (단일 봇) -->
     <div id="inspector-overlay" class="fixed inset-0 bg-black bg-opacity-20 z-40 hidden" onclick="closeInspector()"></div>
     <div id="inspector-drawer" class="fixed top-0 right-0 h-full w-[500px] bg-white bg-opacity-95 backdrop-blur-md shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col border-l border-indigo-100">
         <!-- Header -->
@@ -124,6 +162,8 @@
                 <div class="flex items-center gap-2">
                     <h2 class="text-2xl font-black text-indigo-900 uppercase" id="inspector-bot-name">BOT</h2>
                     <span class="text-xs font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200" id="inspector-phase">Phase: Unknown</span>
+                    <!-- Phase 3: Role Badge -->
+                    <span class="text-xs font-bold px-2 py-0.5 rounded border" id="inspector-role-badge" style="display:none;"></span>
                 </div>
                 <div class="flex items-center gap-3 mt-2">
                     <select id="inspector-session-select" class="text-xs bg-white border border-gray-300 text-gray-700 rounded px-2 py-1 focus:outline-none focus:border-indigo-500 w-32" onchange="forceFetchInspectorData()">
@@ -178,7 +218,7 @@
                 <canvas id="radarChart" width="400" height="300"></canvas>
             </div>
 
-            <!-- Time Series Charts (Split) -->
+            <!-- Time Series Charts (Single Bot) -->
             <div class="space-y-4">
                 <div class="bg-white p-3 rounded-xl border shadow-sm">
                     <h3 class="text-sm font-bold text-gray-800 mb-2 flex justify-between">
@@ -190,9 +230,16 @@
                 <div class="bg-white p-3 rounded-xl border shadow-sm">
                     <h3 class="text-sm font-bold text-gray-800 mb-2 flex justify-between">
                         <span>Stance Trajectory</span>
-                        <span class="text-[10px] text-gray-400 font-normal">Secondary Axis</span>
+                        <span class="text-[10px] text-gray-400 font-normal">opinion[0] = stance_pole</span>
                     </h3>
                     <canvas id="stanceChart" width="400" height="100"></canvas>
+                </div>
+                <div class="bg-white p-3 rounded-xl border shadow-sm">
+                    <h3 class="text-sm font-bold text-gray-800 mb-2 flex justify-between">
+                        <span>Conviction Trajectory</span>
+                        <span class="text-[10px] text-gray-400 font-normal">opinion[1] = conviction</span>
+                    </h3>
+                    <canvas id="convictionChart" width="400" height="100"></canvas>
                 </div>
             </div>
 
@@ -234,7 +281,7 @@
             <!-- Raw Data Accordion & Copy Buttons -->
             <details class="text-xs bg-gray-900 text-green-400 rounded p-2 overflow-hidden shadow-inner mb-4">
                 <summary class="font-bold text-gray-300 cursor-pointer flex justify-between">
-                    <span>Raw LPDE Tensors & Debug Tools</span>
+                    <span>Raw LPDE Tensors &amp; Debug Tools</span>
                 </summary>
                 <div class="flex gap-2 mt-3 mb-2 flex-wrap">
                     <button onclick="copyToClipboard('summary')" class="bg-gray-700 hover:bg-gray-600 text-white px-2 py-1 rounded text-[10px]">Copy Summary</button>
@@ -243,6 +290,81 @@
                 </div>
                 <pre id="inspector-raw-json" class="whitespace-pre-wrap max-h-60 overflow-y-auto p-2 border-t border-gray-700"></pre>
             </details>
+        </div>
+    </div>
+
+    <!-- 3-Bot Comparison Panel (별도 overlay) -->
+    <div id="comparison-overlay" class="fixed inset-0 bg-black bg-opacity-40 z-60 hidden" onclick="closeComparison()"></div>
+    <div id="comparison-panel" class="fixed top-4 left-1/2 -translate-x-1/2 w-[90vw] max-w-5xl max-h-[90vh] bg-white rounded-3xl shadow-2xl z-70 hidden flex flex-col overflow-hidden border border-indigo-100">
+        <div class="p-5 border-b bg-indigo-50 flex justify-between items-center flex-shrink-0">
+            <div>
+                <h2 class="text-xl font-black text-indigo-900">3봇 입장 비교 뷰</h2>
+                <p class="text-xs text-gray-500 mt-1">stance_pole · conviction · arousal — 세 봇의 실시간 시계열 비교</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <select id="comparison-session-select" class="text-xs bg-white border border-gray-300 rounded px-2 py-1 focus:outline-none focus:border-indigo-500" onchange="loadComparisonData()">
+                    <option value="">Latest Session</option>
+                </select>
+                <button onclick="closeComparison()" class="text-gray-400 hover:text-gray-700 p-2 rounded-full hover:bg-gray-200">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-6 space-y-6">
+            <!-- Role Overview -->
+            <div>
+                <h3 class="text-sm font-bold text-gray-700 mb-2">세션 역할 배정</h3>
+                <div id="comparison-role-badges" class="flex gap-3 flex-wrap">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex gap-2 border-b pb-2">
+                <button class="tab-btn active text-xs font-bold px-4 py-1.5 rounded-t-lg border border-b-0" onclick="switchComparisonTab('stance', this)">Stance Pole</button>
+                <button class="tab-btn text-xs font-bold px-4 py-1.5 rounded-t-lg border border-b-0 text-gray-500 bg-gray-50" onclick="switchComparisonTab('conviction', this)">Conviction</button>
+                <button class="tab-btn text-xs font-bold px-4 py-1.5 rounded-t-lg border border-b-0 text-gray-500 bg-gray-50" onclick="switchComparisonTab('arousal', this)">Arousal</button>
+            </div>
+
+            <!-- Stance Tab -->
+            <div id="tab-stance" class="tab-panel active bg-white rounded-xl p-4 border shadow-sm">
+                <h3 class="text-sm font-bold text-gray-800 mb-1 flex justify-between">
+                    <span>Stance Pole 비교</span>
+                    <span class="text-[10px] text-gray-400">x축: turn, y축: stance_pole [-1, +1]</span>
+                </h3>
+                <canvas id="compStanceChart" height="200"></canvas>
+            </div>
+
+            <!-- Conviction Tab -->
+            <div id="tab-conviction" class="tab-panel bg-white rounded-xl p-4 border shadow-sm">
+                <h3 class="text-sm font-bold text-gray-800 mb-1 flex justify-between">
+                    <span>Conviction 비교</span>
+                    <span class="text-[10px] text-gray-400">x축: turn, y축: conviction [0, 1]</span>
+                </h3>
+                <canvas id="compConvictionChart" height="200"></canvas>
+            </div>
+
+            <!-- Arousal Tab -->
+            <div id="tab-arousal" class="tab-panel bg-white rounded-xl p-4 border shadow-sm">
+                <h3 class="text-sm font-bold text-gray-800 mb-1 flex justify-between">
+                    <span>Arousal 비교</span>
+                    <span class="text-[10px] text-gray-400">x축: turn, y축: arousal [-1, +1]</span>
+                </h3>
+                <canvas id="compArousalChart" height="200"></canvas>
+            </div>
+
+            <!-- Slider -->
+            <div class="bg-gray-50 rounded-xl p-4 border">
+                <h3 class="text-sm font-bold text-gray-700 mb-3 flex justify-between items-center">
+                    <span>Turn 슬라이더</span>
+                    <span class="text-xs text-indigo-600 font-bold" id="slider-turn-label">Turn: —</span>
+                </h3>
+                <input type="range" id="turn-slider" min="0" max="0" value="0" class="w-full" oninput="onSliderChange(this.value)">
+                <div id="slider-snapshot" class="mt-3 grid grid-cols-3 gap-3 text-xs">
+                    <!-- Per-bot snapshot at current turn -->
+                </div>
+            </div>
         </div>
     </div>
 

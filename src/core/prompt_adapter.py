@@ -1,12 +1,18 @@
 """
-Prompt Adapter (Phase 2A)
+Prompt Adapter (Phase 3)
 
 Responsibilities:
 1. build_structured_history(): Gist-based structured history (legacy + Phase 2)
-2. build_prompt(): LPDE state → natural language prompt (Phase 2A, LPDE_FULL_PROMPT)
+2. build_prompt(): LPDE state → natural language prompt (Phase 3, role orientation 포함)
 
 Key principle: NO raw vector dumps in prompts.
 All LPDE state is decoded to natural language descriptions.
+
+opinion_json 차원 정의 (Phase 3):
+  opinion[0] = stance_pole     : 논쟁 축 방향 [-1.0 ~ +1.0]
+  opinion[1] = conviction      : 자기 입장 확신도 [0.0 ~ 1.0]
+  opinion[2] = moral_salience  : 도덕적 민감도 [0.0 ~ 1.0]
+  opinion[3] = flexibility     : 반박 시 흔들림 정도 [0.0 ~ 1.0]
 """
 
 import re
@@ -188,6 +194,7 @@ class PromptAdapter:
         claim_snippet: str = "",
         counter_arg_enabled: bool = False,
         god_directive: str = "",
+        role_meta: Optional[dict] = None,
     ) -> str:
         """
         Build the full LPDE-driven prompt for a crowd bot.
@@ -195,7 +202,7 @@ class PromptAdapter:
         Args:
             current_bot: The bot generating the reply (e.g. "bot_2")
             persona: The bot's persona system prompt
-            lpde_state: {"affect": [v, a], "opinion": [s, g, m, ...], "power": [sa, si]}
+            lpde_state: {"affect": [v, a], "opinion": [s, conv, m, flex], "power": [sa, si]}
             edge_summary: {target_bot: {"trust": ..., "tension": ..., ...}}
             target_bot: The primary debate opponent (from event extraction)
             recent_history: Formatted recent conversation string
@@ -203,6 +210,7 @@ class PromptAdapter:
             claim_snippet: Opponent's last claim (for counter-arg)
             counter_arg_enabled: Whether to enforce mandatory rebuttal
             god_directive: Optional director hint
+            role_meta: Phase 3 role profile dict from CurrentAgentState.role_meta_json
         """
         sections = []
 
@@ -218,21 +226,22 @@ class PromptAdapter:
                 persona_short = persona_short[:250].rstrip() + "..."
             sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER describe or mention it explicitly in your reply.)")
 
-        # --- 3. LPDE Stance ---
-        opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
-        stance = opinion[0] if len(opinion) > 0 else 0.0
-        
-        if stance > 0.3:
-            sections.append("Your Stance: You strongly support the main argument of the original topic.")
-        elif stance < -0.3:
-            sections.append("Your Stance: You strongly oppose the main argument of the original topic.")
+        # --- 3. Role Orientation (Phase 3) ---
+        # decode_role_orientation uses stance_roles presets to generate a natural language description
+        if role_meta:
+            from src.core.stance_roles import decode_role_orientation
+            orientation_text = decode_role_orientation(role_meta)
+            sections.append(orientation_text)
         else:
-            sections.append("Your Stance: You are skeptical and nuanced about the original topic.")
-
-        # --- 4. Post Content ---
-        if post_content:
-            post_short = post_content[:300].rstrip() + ("..." if len(post_content) > 300 else "")
-            sections.append(f"Original Topic:\n{post_short}")
+            # Fallback: simple stance from opinion[0]
+            opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
+            stance = opinion[0] if len(opinion) > 0 else 0.0
+            if stance > 0.3:
+                sections.append("Role Orientation:\n- You strongly support the main argument.")
+            elif stance < -0.3:
+                sections.append("Role Orientation:\n- You strongly oppose the main argument.")
+            else:
+                sections.append("Role Orientation:\n- You are skeptical and nuanced.")
 
         # --- 4. Recent Conversation ---
         if recent_history and recent_history != "No previous conversation.":
@@ -241,13 +250,18 @@ class PromptAdapter:
         # --- 5. Instruction ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
-            f"Instruction:\n"
-            f"Write a highly sarcastic, snarky, and emotionally charged internet comment (1-2 sentences) in English.\n"
-            f"CRITICAL: Read the Recent Conversation above. Mock their logic mercilessly. Use internet slang and a cynical tone.\n"
-            f"Do NOT copy or repeat phrases from the Recent Conversation. Come up with a NEW, original insult.\n"
-            f"Do NOT be polite, objective, or formal. Act like an angry keyboard warrior in a fierce online flame war.\n"
-            f"Do NOT output prefixes like 'bot_x:' or 'Bot's Response:'. Start your comment immediately.\n"
-            f"Mention exactly one of {', '.join(['@' + b for b in other_bots])} at the end of your message."
+            f"Task: Write a single 1-sentence cynical and argumentative reply challenging the opponent's claims.\n\n"
+            f"CRITICAL GUIDELINES:\n"
+            f"- Speak strictly in character according to your personality described above.\n"
+            f"- Maintain your role orientation throughout your reply — do NOT flip sides.\n"
+            f"- Do not use generic AI templates or polite phrasing.\n\n"
+            f"MANDATORY RULES:\n"
+            f"1. YOU MUST QUOTE: Quote 1-3 words from the opponent's comment in 'quotes' and mock or dismantle it using your persona.\n"
+            f"2. NEVER AGREE: Do not say you agree or that they are right. Strongly dispute their stance.\n"
+            f"3. FORMAT: Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end of your response. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
+            f"Example:\n"
+            f"Your claim about 'social media' is completely flawed and naive. @bot_2\n\n"
+            f"Your Reply:"
         )
 
         return "\n\n".join(sections)
