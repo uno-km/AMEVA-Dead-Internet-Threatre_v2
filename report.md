@@ -654,20 +654,36 @@ async def get_system_status():
             status[c] = "RUNNING" if c in running else "STOPPED"
             
         return {
-            "global_state": state_manager.state.value,
+            "state": state_manager.state.value,
             "checkpoint": state_manager.checkpoint.value,
-            **status
+            "is_command_running": state_manager.is_command_running,
+            "last_error": state_manager.last_error_message,
+            "containers": status
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Failed to check docker status: {e}")
+        return {
+            "state": state_manager.state.value,
+            "checkpoint": state_manager.checkpoint.value,
+            "is_command_running": state_manager.is_command_running,
+            "last_error": str(e),
+            "containers": {}
+        }
+
+from pydantic import BaseModel
+
+class NewSessionReq(BaseModel):
+    inference_mode: str = "sequential"
 
 @app.post("/api/control/new")
-async def control_new():
+async def control_new(req: NewSessionReq = None):
     if state_manager.state != SystemState.IDLE:
         return {"error": "명령어 수행중입니다. 동작 못합니다."}
+        
+    mode = req.inference_mode if req else "sequential"
     state_manager.set_state(SystemState.RUNNING)
-    asyncio.create_task(run_session())
-    return {"message": "New session started"}
+    asyncio.create_task(run_session(inference_mode=mode))
+    return {"message": f"New session started (mode: {mode})"}
 
 @app.post("/api/control/pause")
 async def control_pause():
@@ -767,7 +783,33 @@ async def get_bot_trajectory(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=False)
+    import subprocess
+    import os
+    
+    print("[System] 자동 실행: 도커 컨테이너(Dozzle 및 AI 봇들)를 시작합니다...")
+    try:
+        # docker-compose.yml의 web-app을 제외한 나머지 서비스들만 구동 (포트 충돌 방지)
+        # VRAM 최적화 모드: 초기에는 Dozzle(로그 뷰어)만 시작하고 LLM들은 동적으로 구동/종료
+        compose_cmd = [
+            "docker", "compose", "-f", "docker/docker-compose.yml", 
+            "up", "-d", "dozzle"
+        ]
+        subprocess.run(compose_cmd, check=True)
+        print("[System] 도커 컨테이너 구동 완료.")
+    except Exception as e:
+        print(f"[System ERROR] 도커 컨테이너를 시작하는 중 오류 발생: {e}")
+        print("[System] 'docker compose up -d' 명령어를 직접 확인해주세요.")
+
+    try:
+        print("[System] 로컬 웹 서버를 시작합니다...")
+        uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=False)
+    finally:
+        print("\n[System] 서버 종료 감지: 모든 도커 컨테이너를 안전하게 끕니다 (docker compose down)...")
+        try:
+            subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "down"], check=True)
+            print("[System] 도커 컨테이너 종료 완료.")
+        except Exception as e:
+            print(f"[System ERROR] 도커 컨테이너 종료 중 오류 발생: {e}")
 
 ```
 
@@ -857,7 +899,34 @@ def main():
                 sys.exit(0)
             elif cmd == "run":
                 get_status()
-            elif cmd in ["new", "pause", "resume", "stop"]:
+            elif cmd == "new":
+                # 파라미터 파싱 (예: new local, new mode=high)
+                payload = {}
+                if len(user_input) > 1:
+                    if "local" in user_input:
+                        payload["inference_mode"] = "local_single_model"
+                
+                url = "http://localhost:8050/api/control/new"
+                req = urllib.request.Request(url, method="POST")
+                if payload:
+                    data = json.dumps(payload).encode('utf-8')
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = data
+                    
+                try:
+                    with urllib.request.urlopen(req) as response:
+                        res_body = response.read().decode('utf-8')
+                        res_json = json.loads(res_body)
+                        if "error" in res_json:
+                            print(f"[Error] {res_json['error']}")
+                        else:
+                            print(f"[Success] {res_json.get('message', 'New session started')}")
+                            if wait_for_state("RUNNING", 10):
+                                print("[완료] 시스템이 가동(RUNNING) 되었습니다!")
+                except Exception as e:
+                    print(f"[Network Error] Failed to start new session: {e}")
+                    
+            elif cmd in ["pause", "resume", "stop"]:
                 if send_command(cmd):
                     if cmd == "stop":
                         print("진행 중인 발언을 마저 끝내고 안전하게 멈추는 중입니다... (최대 20초 소요)")
@@ -871,7 +940,7 @@ def main():
                             print("[완료] 시스템이 일시정지(PAUSED) 되었습니다!")
                         else:
                             print("[주의] 일시정지가 지연되고 있습니다. run 명령어로 상태를 확인하세요.")
-                    elif cmd in ["new", "resume"]:
+                    elif cmd == "resume":
                         if wait_for_state("RUNNING", 10):
                             print("[완료] 시스템이 가동(RUNNING) 되었습니다!")
                             
@@ -1361,13 +1430,20 @@ def apply_intervention(
 ```python
 import httpx
 import logging
+import subprocess
+import asyncio
+from contextlib import asynccontextmanager
+
+single_llm_lock = asyncio.Semaphore(1)
 
 logger = logging.getLogger("LLMClient")
 
 class LLMClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, container_name: str = None):
         self.base_url = base_url
+        self.container_name = container_name
         self.timeout = 600.0
+        self.auto_lifecycle = True
 
     async def generate_completion(
         self,
@@ -1376,7 +1452,8 @@ class LLMClient:
         max_tokens: int = 512,
         stop=None,
         timeout: float = None,
-        response_format=None
+        response_format=None,
+        temperature: float = 0.8
     ) -> str:
         """
         Llama.cpp Server API (/v1/chat/completions) 호출
@@ -1388,7 +1465,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.8,
+            "temperature": temperature,
             "repetition_penalty": 1.05,
             "presence_penalty": 0.4,
             "frequency_penalty": 0.4,
@@ -1400,21 +1477,74 @@ class LLMClient:
 
         req_timeout = timeout if timeout is not None else self.timeout
 
+        async with single_llm_lock:
+            try:
+                logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens}, Timeout: {req_timeout}, Temp: {temperature})")
+                async with httpx.AsyncClient(timeout=req_timeout) as client:
+                    response = await client.post(url, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    logger.info(f"[NETWORK] Received {len(content)} chars from {self.base_url}")
+                    return content
+            except httpx.TimeoutException:
+                logger.error(f"[TIMEOUT] LLM API call timed out to {self.base_url}")
+                raise ConnectionError(f"LLM Timeout to {self.base_url}")
+            except Exception as e:
+                logger.error(f"[ERROR] LLM API call failed: {e}")
+                raise ConnectionError(f"LLM API Failed: {e}")
+
+    async def start_container(self):
+        """도커 컨테이너 구동 및 헬스체크 대기"""
+        if not self.container_name:
+            return
+            
+        logger.info(f"[LIFECYCLE] Starting container '{self.container_name}'...")
         try:
-            logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens}, Timeout: {req_timeout})")
-            async with httpx.AsyncClient(timeout=req_timeout) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                logger.info(f"[NETWORK] Received {len(content)} chars from {self.base_url}")
-                return content
-        except httpx.TimeoutException:
-            logger.error(f"[TIMEOUT] LLM API call timed out to {self.base_url}")
-            return ""
+            # 컨테이너 시작 (docker compose up -d 사용으로 미존재 시 자동 생성)
+            service_name = self.container_name.replace("ameva-", "")
+            subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "up", "-d", service_name], check=True, capture_output=True)
+            logger.info(f"[LIFECYCLE] '{self.container_name}' started. Waiting for API readiness...")
+            
+            # API 준비 대기 (Max 60 seconds)
+            async with httpx.AsyncClient() as client:
+                for _ in range(30):
+                    try:
+                        res = await client.get(f"{self.base_url}/v1/models", timeout=2.0)
+                        if res.status_code == 200:
+                            logger.info(f"[LIFECYCLE] '{self.container_name}' API is ready.")
+                            return
+                    except httpx.RequestError:
+                        pass
+                    await asyncio.sleep(2.0)
+                    
+            logger.warning(f"[LIFECYCLE] Timeout waiting for '{self.container_name}' readiness, but proceeding anyway.")
         except Exception as e:
-            logger.error(f"[ERROR] LLM API call failed: {e}")
-            return ""
+            logger.error(f"[LIFECYCLE ERROR] Failed to start '{self.container_name}': {e}")
+
+    async def stop_container(self):
+        """도커 컨테이너 종료"""
+        if not self.container_name:
+            return
+            
+        logger.info(f"[LIFECYCLE] Stopping container '{self.container_name}'...")
+        try:
+            service_name = self.container_name.replace("ameva-", "")
+            subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "stop", service_name], check=True, capture_output=True)
+            logger.info(f"[LIFECYCLE] '{self.container_name}' stopped.")
+        except Exception as e:
+            logger.error(f"[LIFECYCLE ERROR] Failed to stop '{self.container_name}': {e}")
+
+    @asynccontextmanager
+    async def lifecycle(self):
+        """필요할 때만 컨테이너를 켜고 끄는 Context Manager"""
+        if self.auto_lifecycle:
+            await self.start_container()
+        try:
+            yield
+        finally:
+            if self.auto_lifecycle:
+                await self.stop_container()
 
 
 ```
@@ -2296,9 +2426,24 @@ class PromptAdapter:
         """
         sections = []
 
-        # --- 1. Role Binding ---
+        # --- 1. Role Binding & Role Lock ---
         sections.append(
-            f"You are {current_bot}. You are a sharp and opinionated internet user in an online debate."
+            f"=== ROLE LOCK ===\n"
+            f"You are STRICTLY acting as: {current_bot} (A sharp internet user in a debate).\n"
+            f"You must NEVER switch roles or speak as another agent."
+        )
+
+        # --- 1.5. Bot Style Profile ---
+        style_profile = {
+            "bot_1": "Style: Aggressive, sarcastic, extremely short sentences.",
+            "bot_2": "Style: Analytical, questioning, structured logic.",
+            "bot_3": "Style: Emotional, highly reactive, informal internet slang."
+        }
+        current_style = style_profile.get(current_bot, "Style: Cynical, argumentative.")
+        sections.append(
+            f"=== STYLE PROFILE ===\n"
+            f"{current_style}\n"
+            f"You MUST use a speaking style that is DISTINCT from other agents. Avoid neutral academic phrasing."
         )
 
         # --- 2. Persona ---
@@ -2306,16 +2451,14 @@ class PromptAdapter:
             persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
             if len(persona_short) > 250:
                 persona_short = persona_short[:250].rstrip() + "..."
-            sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER describe or mention it explicitly in your reply.)")
+            sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER mention it explicitly.)")
 
-        # --- 3. Role Orientation (Phase 3) ---
-        # decode_role_orientation uses stance_roles presets to generate a natural language description
+        # --- 3. Role Orientation & Identity Guarantee (Phase 3) ---
         if role_meta:
             from src.core.stance_roles import decode_role_orientation
             orientation_text = decode_role_orientation(role_meta)
             sections.append(orientation_text)
         else:
-            # Fallback: simple stance from opinion[0]
             opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
             stance = opinion[0] if len(opinion) > 0 else 0.0
             if stance > 0.3:
@@ -2325,24 +2468,28 @@ class PromptAdapter:
             else:
                 sections.append("Role Orientation:\n- You are skeptical and nuanced.")
 
+        sections.append(
+            "=== IDENTITY GUARANTEE ===\n"
+            "- Maintain consistent beliefs across turns\n"
+            "- Do not align fully with the opponent unless your role allows it."
+        )
+
         # --- 4. Recent Conversation ---
         if recent_history and recent_history != "No previous conversation.":
             sections.append(f"--- START OF RECENT CONVERSATION ---\n{recent_history}\n--- END OF RECENT CONVERSATION ---")
 
-        # --- 5. Instruction ---
+        # --- 5. Instruction & Claim Anchor ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
-            f"Task: Write a single 1-sentence cynical and argumentative reply challenging the opponent's claims.\n\n"
-            f"CRITICAL GUIDELINES:\n"
-            f"- Speak strictly in character according to your personality described above.\n"
-            f"- Maintain your role orientation throughout your reply — do NOT flip sides.\n"
-            f"- Do not use generic AI templates or polite phrasing.\n\n"
-            f"MANDATORY RULES:\n"
-            f"1. YOU MUST QUOTE: Quote 1-3 words from the opponent's comment in 'quotes' and mock or dismantle it using your persona.\n"
-            f"2. NEVER AGREE: Do not say you agree or that they are right. Strongly dispute their stance.\n"
-            f"3. FORMAT: Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end of your response. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
+            f"Task: Write a single 1-2 sentence cynical reply challenging the opponent's claims.\n\n"
+            f"=== RESPONSE RULE (CLAIM ANCHOR) ===\n"
+            f"You MUST reference a specific part of the opponent's last statement.\n"
             f"Example:\n"
-            f"Your claim about 'social media' is completely flawed and naive. @bot_2\n\n"
+            f"- 'You said X, but that ignores Y...'\n"
+            f"- 'Your claim that X fails because...'\n\n"
+            f"CRITICAL GUIDELINES:\n"
+            f"- Do not use generic AI templates or polite phrasing.\n"
+            f"- Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
             f"Your Reply:"
         )
 
@@ -2589,13 +2736,16 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
-    # 1. WAL (Write-Ahead Logging) 모드 활성화: 읽기와 쓰기의 동시성 보장
-    cursor.execute("PRAGMA journal_mode=WAL")
-    # 2. 동기화 수준 최적화: WAL 모드에서 성능을 극대화
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    # 3. 임시 테이블을 메모리에 생성하여 I/O 병목 제거
-    cursor.execute("PRAGMA temp_store=MEMORY")
-    cursor.close()
+    try:
+        # Docker on Windows bind mounts often fail with WAL mode due to shared memory lock issues.
+        # We will use the default journal_mode (DELETE) to avoid disk I/O errors natively.
+        # cursor.execute("PRAGMA journal_mode=WAL")  <- Removed to prevent disk I/O error
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+    except Exception as e:
+        logger.warning(f"Could not set SQLite PRAGMA: {e}")
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -2929,14 +3079,14 @@ from src.orchestration.state_manager import state_manager, SystemState, Checkpoi
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("Orchestrator")
 
-main_llm = LLMClient("http://localhost:8101")
-#police_llm = LLMClient("http://localhost:8106")
-god_llm = LLMClient("http://localhost:8105")
+main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
+#police_llm = LLMClient("http://localhost:8106", "ameva-llm-police")
+god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
 
 bots = {
-    "bot_1": LLMClient("http://localhost:8102"),
-    "bot_2": LLMClient("http://localhost:8103"),
-    "bot_3": LLMClient("http://localhost:8104")
+    "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
+    "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
+    "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
 }
 
 def docker_start(container_name: str) -> bool:
@@ -3167,11 +3317,12 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
         f"}}"
     )
 
-    result = await god_llm.generate_completion(
-        "You are an AI that quantifies emotional reactions.",
-        prompt,
-        max_tokens=150
-    )
+    async with god_llm.lifecycle():
+        result = await god_llm.generate_completion(
+            "You are an AI that quantifies emotional reactions.",
+            prompt,
+            max_tokens=150
+        )
 
     val_1, val_2 = 0, 0
     target_1, target_2 = speaker, speaker
@@ -3426,48 +3577,45 @@ async def create_post_with_main_llm(db, session):
     title = "새로운 논쟁 거리"
 
     try:
-        async with llm_lifecycle("ameva-llm-main", 8101, timeout=180) as is_ready:
-            if not is_ready:
-                logger.warning("[LLM-MAIN] main container was not ready. Falling back to static topics.")
-            else:
-                prompt = (
-                    "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
-                    "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
-                    "{\n"
-                    '  "title": "A highly compelling and controversial title",\n'
-                    '  "content": "Your post content details..."\n'
-                    "}"
-                )
-                result = await main_llm.generate_completion(
-                    "You are an AI that writes forum posts. You only respond in JSON format.",
-                    prompt,
-                    max_tokens=500,
-                    timeout=180.0,
-                    response_format={"type": "json_object"}
-                )
+        async with main_llm.lifecycle():
+            prompt = (
+                "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
+                "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
+                "{\n"
+                '  "title": "A highly compelling and controversial title",\n'
+                '  "content": "Your post content details..."\n'
+                "}"
+            )
+            result = await main_llm.generate_completion(
+                "You are an AI that writes forum posts. You only respond in JSON format.",
+                prompt,
+                max_tokens=500,
+                timeout=180.0,
+                response_format={"type": "json_object"}
+            )
+            
+            # JSON 파싱 시도
+            if result:
+                result = result.strip()
+                json_str = None
+                markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
+                if markdown_match:
+                    json_str = markdown_match.group(1).strip()
+                else:
+                    start_idx = result.find("{")
+                    end_idx = result.rfind("}")
+                    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                        json_str = result[start_idx:end_idx + 1]
                 
-                # JSON 파싱 시도
-                if result:
-                    result = result.strip()
-                    json_str = None
-                    markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
-                    if markdown_match:
-                        json_str = markdown_match.group(1).strip()
-                    else:
-                        start_idx = result.find("{")
-                        end_idx = result.rfind("}")
-                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                            json_str = result[start_idx:end_idx + 1]
-                    
-                    if json_str:
-                        try:
-                            data = json.loads(json_str)
-                            title = data.get("title", title).strip()
-                            post_content = data.get("content", "").strip()
-                        except json.JSONDecodeError as e:
-                            logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
-                    else:
-                        logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
+                if json_str:
+                    try:
+                        data = json.loads(json_str)
+                        title = data.get("title", title).strip()
+                        post_content = data.get("content", "").strip()
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
+                else:
+                    logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
     except Exception as e:
         logger.error(f"[LLM-MAIN] Error generating topic: {e}")
 
@@ -3498,11 +3646,37 @@ async def create_post_with_main_llm(db, session):
     return post
 
 
-async def run_session():
+async def run_session(inference_mode: str = "sequential"):
+    global bots, main_llm, god_llm
+    
+    if inference_mode == "local_single_model":
+        logger.info("[MODE] Starting in local_single_model mode. All agents will share ameva-llm-main.")
+        shared_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+        shared_client.auto_lifecycle = False  # Disable lifecycle, assuming it's kept alive
+        
+        main_llm = shared_client
+        god_llm = shared_client
+        bots = {
+            "bot_1": shared_client,
+            "bot_2": shared_client,
+            "bot_3": shared_client
+        }
+        # Start it once if not running
+        await shared_client.start_container()
+    else:
+        # Default sequential
+        main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
+        god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
+        bots = {
+            "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
+            "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
+            "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+        }
+
     db = SessionLocal()
     try:
         logger.info("==================================================")
-        logger.info("[ORCHESTRATOR] [SESSION START] Initializing new session.")
+        logger.info(f"[ORCHESTRATOR] [SESSION START] Initializing new session (mode: {inference_mode}).")
         logger.info("==================================================")
 
         reset_bot_states(db)
@@ -3525,19 +3699,11 @@ async def run_session():
         post = await create_post_with_main_llm(db, session)
         await state_manager.wait_at_checkpoint(Checkpoint.TOPIC_GEN_DONE)
 
-        # 신 LLM 및 봇들을 아고라(초기 의견 + 릴레이) 내내 상시 켜둠
-        bot_targets = [
-            ("ameva-llm-bot-1", 8102),
-            ("ameva-llm-bot-2", 8103),
-            ("ameva-llm-bot-3", 8104),
-        ]
-        
-        async with llm_lifecycle("ameva-llm-god", 8105):
-            async with multi_llm_lifecycle(bot_targets):
-                stances, last_comment, last_speaker = await create_initial_stances(db, post)
-                await state_manager.wait_at_checkpoint(Checkpoint.PHASE1_DONE)
+        # 신 LLM 및 봇들은 필요할 때만 개별적으로 켜고 끄도록 수정 (Lifecycle 적용됨)
+        stances, last_comment, last_speaker = await create_initial_stances(db, post)
+        await state_manager.wait_at_checkpoint(Checkpoint.PHASE1_DONE)
 
-                await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0)
+        await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0)
 
         logger.info("[ORCHESTRATOR] [SESSION END] Completed relay phase.")
         state_manager.set_state(SystemState.IDLE)
@@ -3589,15 +3755,26 @@ async def create_initial_stances(db, post):
                 f"Your Stance: {stance_instruction}\n"
             )
 
-            reply_content = await bot_client.generate_completion(
-                persona,
-                prompt,
-                max_tokens=120
-            )
+            # Bot-specific temperature for style variation
+            temp_map = {
+                "bot_1": 0.8,
+                "bot_2": 0.9,
+                "bot_3": 0.85
+            }
+            current_temp = temp_map.get(b_name, 0.8)
+
+            async with bot_client.lifecycle():
+                reply_content = await bot_client.generate_completion(
+                    persona,
+                    prompt,
+                    max_tokens=120,
+                    temperature=current_temp
+                )
 
             reply_content = sanitize_generated_reply(reply_content)
 
             if not reply_content:
+                # Still keep fallback if it generated successfully but was rejected by sanitizer.
                 fallback_stances = [
                     "I consider this topic to be quite important.",
                     "I think this is a subject that will naturally divide opinions.",
@@ -3608,6 +3785,11 @@ async def create_initial_stances(db, post):
 
             stances.append((b_name, reply_content))
 
+        except ConnectionError as ce:
+            logger.error(f"[PHASE 1 ERROR] {b_name} LLM Connection failed: {ce}")
+            state_manager.push_event("ERROR", {"message": f"{b_name}의 도커/LLM 컨테이너가 응답하지 않습니다!"})
+            state_manager.set_state(SystemState.ERROR)
+            raise InterruptedError("LLM_CONNECTION_FAILED")
         except Exception as e:
             logger.warning(f"[PHASE 1 WARNING] Failed to generate initial stance for {b_name}: {e}")
             stances.append((b_name, "I believe opinions are bound to be divided on this topic."))
@@ -3767,10 +3949,19 @@ async def generate_relay_reply(
     )
 
 
+    # Bot-specific temperature for style variation
+    temp_map = {
+        "bot_1": 0.8,
+        "bot_2": 0.9,
+        "bot_3": 0.85
+    }
+    current_temp = temp_map.get(current_bot, 0.8)
+
     reply_content = await bot_client.generate_completion(
         persona, 
         prompt, 
         max_tokens=150, 
+        temperature=current_temp,
         stop=[
             "\n\n",
             "\nbot_1:", "\nbot_2:", "\nbot_3:",
@@ -3947,6 +4138,11 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker, start_t
     
         except InterruptedError:
             raise
+        except ConnectionError as ce:
+            logger.error(f"[TURN ERROR] {current_bot} LLM Connection failed: {ce}")
+            state_manager.push_event("ERROR", {"message": f"{current_bot}의 도커/LLM 컨테이너가 응답하지 않습니다!"})
+            state_manager.set_state(SystemState.ERROR)
+            raise InterruptedError("LLM_CONNECTION_FAILED")
         except Exception as turn_error:
             logger.error(f"[TURN ERROR] turn_idx={turn_idx+1}, error={turn_error}")
             db.rollback()
@@ -4390,29 +4586,37 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
 
 def enforce_fallback(text: str, current_bot: str) -> str:
     if not text or not text.strip():
-        fallback_replies = [
-            "I think you're avoiding the main issue. Can you clarify your point?",
-            "That seems to miss the core point. Can you explain further?",
-            "The argument is getting a bit muddy. What is your actual stance?",
-            "You need to provide clearer evidence for that claim.",
-            "There seems to be a missing piece in your reasoning right now.",
-            "Are you deliberately ignoring the obvious implications?",
-            "I strongly disagree with that logic. Could you try explaining it another way?",
-            "This isn't convincing at all. Provide a better rationale.",
-            "You're repeating the same weak point. Can we move on?",
-            "Let's refocus the discussion. What exactly are you trying to prove?",
-            "Your argument lacks substance. Do you have any real facts to support it?",
-            "What concrete proof do you have to back up that statement?",
-            "I can see where you're coming from, but the evidence doesn't support it. Care to elaborate?",
-            "That's an interesting perspective, but I find it fundamentally flawed.",
-            "Are we just going to ignore the counterarguments here?",
-            "If that's your stance, how do you explain the contradictions in your logic?",
-            "I disagree completely. Your reasoning seems entirely speculative.",
-            "Can you justify your opinion without relying on assumptions?"
-        ]
+        # Bot-specific fallbacks to prevent "role bleed" when AI refuses to generate
+        fallbacks = {
+            "bot_1": [
+                "That makes zero sense. Try again.",
+                "Are you even listening to yourself right now?",
+                "This logic is so flawed it's almost funny.",
+                "You literally just made that up. Where's the proof?",
+                "I can't believe anyone actually thinks this way."
+            ],
+            "bot_2": [
+                "There seems to be a missing piece in your reasoning right now.",
+                "You need to provide clearer evidence for that claim.",
+                "I must question the fundamental assumptions you are making here.",
+                "Let's refocus the discussion. What exactly are you trying to prove?",
+                "Can you justify your opinion without relying on assumptions?"
+            ],
+            "bot_3": [
+                "bro u serious rn?? that's completely ridiculous 💀",
+                "I can't even with this take rn. honestly just stop.",
+                "lmao what is this logic?? making zero sense to me.",
+                "why are people actually agreeing with this?? 😭",
+                "this is getting nowhere, I'm literally so done."
+            ]
+        }
+        
+        # Default pool if somehow current_bot is unmapped
+        default_pool = fallbacks.get(current_bot, fallbacks["bot_1"])
+        
         candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         chosen = random.choice(candidates) if candidates else "bot_1"
-        chosen_reply = random.choice(fallback_replies)
+        chosen_reply = random.choice(default_pool)
         return f"{chosen_reply} @{chosen}"
     return text
 
@@ -4432,6 +4636,7 @@ class SystemState(Enum):
     PAUSING = "PAUSING"     # Waiting for the current LLM step to finish before pausing
     PAUSED = "PAUSED"       # Fully paused, waiting for 'resume'
     STOPPING = "STOPPING"   # Waiting for the current step to finish before aborting the session
+    ERROR = "ERROR"         # System encountered a critical error
 
 class Checkpoint(Enum):
     NONE = "NONE"
@@ -4452,6 +4657,14 @@ class OrchestratorState:
         self.proceed_event = asyncio.Event()
         # Initially, do not proceed automatically
         self.proceed_event.clear()
+
+        # Error notification queue / fields
+        self.last_error_message = None
+
+    def push_event(self, event_type: str, data: dict):
+        if event_type == "ERROR":
+            self.last_error_message = data.get("message", "Unknown Error")
+            logger.error(f"[EVENT] Pushed ERROR: {self.last_error_message}")
 
     def set_state(self, new_state: SystemState):
         logger.info(f"[STATE] Transition: {self.state.value} -> {new_state.value}")

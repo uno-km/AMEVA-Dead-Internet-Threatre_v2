@@ -82,7 +82,34 @@ def main():
                 sys.exit(0)
             elif cmd == "run":
                 get_status()
-            elif cmd in ["new", "pause", "resume", "stop"]:
+            elif cmd == "new":
+                # 파라미터 파싱 (예: new local, new mode=high)
+                payload = {}
+                if len(user_input) > 1:
+                    if "local" in user_input:
+                        payload["inference_mode"] = "local_single_model"
+                
+                url = "http://localhost:8050/api/control/new"
+                req = urllib.request.Request(url, method="POST")
+                if payload:
+                    data = json.dumps(payload).encode('utf-8')
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = data
+                    
+                try:
+                    with urllib.request.urlopen(req) as response:
+                        res_body = response.read().decode('utf-8')
+                        res_json = json.loads(res_body)
+                        if "error" in res_json:
+                            print(f"[Error] {res_json['error']}")
+                        else:
+                            print(f"[Success] {res_json.get('message', 'New session started')}")
+                            if wait_for_state("RUNNING", 10):
+                                print("[완료] 시스템이 가동(RUNNING) 되었습니다!")
+                except Exception as e:
+                    print(f"[Network Error] Failed to start new session: {e}")
+                    
+            elif cmd in ["pause", "resume", "stop"]:
                 if send_command(cmd):
                     if cmd == "stop":
                         print("진행 중인 발언을 마저 끝내고 안전하게 멈추는 중입니다... (최대 20초 소요)")
@@ -96,7 +123,7 @@ def main():
                             print("[완료] 시스템이 일시정지(PAUSED) 되었습니다!")
                         else:
                             print("[주의] 일시정지가 지연되고 있습니다. run 명령어로 상태를 확인하세요.")
-                    elif cmd in ["new", "resume"]:
+                    elif cmd == "resume":
                         if wait_for_state("RUNNING", 10):
                             print("[완료] 시스템이 가동(RUNNING) 되었습니다!")
                             

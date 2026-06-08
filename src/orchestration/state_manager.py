@@ -10,6 +10,7 @@ class SystemState(Enum):
     PAUSING = "PAUSING"     # Waiting for the current LLM step to finish before pausing
     PAUSED = "PAUSED"       # Fully paused, waiting for 'resume'
     STOPPING = "STOPPING"   # Waiting for the current step to finish before aborting the session
+    ERROR = "ERROR"         # System encountered a critical error
 
 class Checkpoint(Enum):
     NONE = "NONE"
@@ -30,6 +31,14 @@ class OrchestratorState:
         self.proceed_event = asyncio.Event()
         # Initially, do not proceed automatically
         self.proceed_event.clear()
+
+        # Error notification queue / fields
+        self.last_error_message = None
+
+    def push_event(self, event_type: str, data: dict):
+        if event_type == "ERROR":
+            self.last_error_message = data.get("message", "Unknown Error")
+            logger.error(f"[EVENT] Pushed ERROR: {self.last_error_message}")
 
     def set_state(self, new_state: SystemState):
         logger.info(f"[STATE] Transition: {self.state.value} -> {new_state.value}")

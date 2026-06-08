@@ -22,13 +22,16 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
-    # 1. WAL (Write-Ahead Logging) 모드 활성화: 읽기와 쓰기의 동시성 보장
-    cursor.execute("PRAGMA journal_mode=WAL")
-    # 2. 동기화 수준 최적화: WAL 모드에서 성능을 극대화
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    # 3. 임시 테이블을 메모리에 생성하여 I/O 병목 제거
-    cursor.execute("PRAGMA temp_store=MEMORY")
-    cursor.close()
+    try:
+        # Docker on Windows bind mounts often fail with WAL mode due to shared memory lock issues.
+        # We will use the default journal_mode (DELETE) to avoid disk I/O errors natively.
+        # cursor.execute("PRAGMA journal_mode=WAL")  <- Removed to prevent disk I/O error
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+    except Exception as e:
+        logger.warning(f"Could not set SQLite PRAGMA: {e}")
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -34,14 +34,14 @@ from src.orchestration.state_manager import state_manager, SystemState, Checkpoi
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("Orchestrator")
 
-main_llm = LLMClient("http://localhost:8101")
-#police_llm = LLMClient("http://localhost:8106")
-god_llm = LLMClient("http://localhost:8105")
+main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
+#police_llm = LLMClient("http://localhost:8106", "ameva-llm-police")
+god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
 
 bots = {
-    "bot_1": LLMClient("http://localhost:8102"),
-    "bot_2": LLMClient("http://localhost:8103"),
-    "bot_3": LLMClient("http://localhost:8104")
+    "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
+    "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
+    "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
 }
 
 def docker_start(container_name: str) -> bool:
@@ -272,11 +272,12 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
         f"}}"
     )
 
-    result = await god_llm.generate_completion(
-        "You are an AI that quantifies emotional reactions.",
-        prompt,
-        max_tokens=150
-    )
+    async with god_llm.lifecycle():
+        result = await god_llm.generate_completion(
+            "You are an AI that quantifies emotional reactions.",
+            prompt,
+            max_tokens=150
+        )
 
     val_1, val_2 = 0, 0
     target_1, target_2 = speaker, speaker
@@ -531,48 +532,45 @@ async def create_post_with_main_llm(db, session):
     title = "새로운 논쟁 거리"
 
     try:
-        async with llm_lifecycle("ameva-llm-main", 8101, timeout=180) as is_ready:
-            if not is_ready:
-                logger.warning("[LLM-MAIN] main container was not ready. Falling back to static topics.")
-            else:
-                prompt = (
-                    "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
-                    "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
-                    "{\n"
-                    '  "title": "A highly compelling and controversial title",\n'
-                    '  "content": "Your post content details..."\n'
-                    "}"
-                )
-                result = await main_llm.generate_completion(
-                    "You are an AI that writes forum posts. You only respond in JSON format.",
-                    prompt,
-                    max_tokens=500,
-                    timeout=180.0,
-                    response_format={"type": "json_object"}
-                )
+        async with main_llm.lifecycle():
+            prompt = (
+                "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
+                "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
+                "{\n"
+                '  "title": "A highly compelling and controversial title",\n'
+                '  "content": "Your post content details..."\n'
+                "}"
+            )
+            result = await main_llm.generate_completion(
+                "You are an AI that writes forum posts. You only respond in JSON format.",
+                prompt,
+                max_tokens=500,
+                timeout=180.0,
+                response_format={"type": "json_object"}
+            )
+            
+            # JSON 파싱 시도
+            if result:
+                result = result.strip()
+                json_str = None
+                markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
+                if markdown_match:
+                    json_str = markdown_match.group(1).strip()
+                else:
+                    start_idx = result.find("{")
+                    end_idx = result.rfind("}")
+                    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                        json_str = result[start_idx:end_idx + 1]
                 
-                # JSON 파싱 시도
-                if result:
-                    result = result.strip()
-                    json_str = None
-                    markdown_match = re.search(r"```(?:json)?\s*(.*?)\s*```", result, re.DOTALL)
-                    if markdown_match:
-                        json_str = markdown_match.group(1).strip()
-                    else:
-                        start_idx = result.find("{")
-                        end_idx = result.rfind("}")
-                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                            json_str = result[start_idx:end_idx + 1]
-                    
-                    if json_str:
-                        try:
-                            data = json.loads(json_str)
-                            title = data.get("title", title).strip()
-                            post_content = data.get("content", "").strip()
-                        except json.JSONDecodeError as e:
-                            logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
-                    else:
-                        logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
+                if json_str:
+                    try:
+                        data = json.loads(json_str)
+                        title = data.get("title", title).strip()
+                        post_content = data.get("content", "").strip()
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
+                else:
+                    logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
     except Exception as e:
         logger.error(f"[LLM-MAIN] Error generating topic: {e}")
 
@@ -603,11 +601,37 @@ async def create_post_with_main_llm(db, session):
     return post
 
 
-async def run_session():
+async def run_session(inference_mode: str = "sequential"):
+    global bots, main_llm, god_llm
+    
+    if inference_mode == "local_single_model":
+        logger.info("[MODE] Starting in local_single_model mode. All agents will share ameva-llm-main.")
+        shared_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+        shared_client.auto_lifecycle = False  # Disable lifecycle, assuming it's kept alive
+        
+        main_llm = shared_client
+        god_llm = shared_client
+        bots = {
+            "bot_1": shared_client,
+            "bot_2": shared_client,
+            "bot_3": shared_client
+        }
+        # Start it once if not running
+        await shared_client.start_container()
+    else:
+        # Default sequential
+        main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
+        god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
+        bots = {
+            "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
+            "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
+            "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+        }
+
     db = SessionLocal()
     try:
         logger.info("==================================================")
-        logger.info("[ORCHESTRATOR] [SESSION START] Initializing new session.")
+        logger.info(f"[ORCHESTRATOR] [SESSION START] Initializing new session (mode: {inference_mode}).")
         logger.info("==================================================")
 
         reset_bot_states(db)
@@ -630,19 +654,11 @@ async def run_session():
         post = await create_post_with_main_llm(db, session)
         await state_manager.wait_at_checkpoint(Checkpoint.TOPIC_GEN_DONE)
 
-        # 신 LLM 및 봇들을 아고라(초기 의견 + 릴레이) 내내 상시 켜둠
-        bot_targets = [
-            ("ameva-llm-bot-1", 8102),
-            ("ameva-llm-bot-2", 8103),
-            ("ameva-llm-bot-3", 8104),
-        ]
-        
-        async with llm_lifecycle("ameva-llm-god", 8105):
-            async with multi_llm_lifecycle(bot_targets):
-                stances, last_comment, last_speaker = await create_initial_stances(db, post)
-                await state_manager.wait_at_checkpoint(Checkpoint.PHASE1_DONE)
+        # 신 LLM 및 봇들은 필요할 때만 개별적으로 켜고 끄도록 수정 (Lifecycle 적용됨)
+        stances, last_comment, last_speaker = await create_initial_stances(db, post)
+        await state_manager.wait_at_checkpoint(Checkpoint.PHASE1_DONE)
 
-                await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0)
+        await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0)
 
         logger.info("[ORCHESTRATOR] [SESSION END] Completed relay phase.")
         state_manager.set_state(SystemState.IDLE)
@@ -694,15 +710,26 @@ async def create_initial_stances(db, post):
                 f"Your Stance: {stance_instruction}\n"
             )
 
-            reply_content = await bot_client.generate_completion(
-                persona,
-                prompt,
-                max_tokens=120
-            )
+            # Bot-specific temperature for style variation
+            temp_map = {
+                "bot_1": 0.8,
+                "bot_2": 0.9,
+                "bot_3": 0.85
+            }
+            current_temp = temp_map.get(b_name, 0.8)
+
+            async with bot_client.lifecycle():
+                reply_content = await bot_client.generate_completion(
+                    persona,
+                    prompt,
+                    max_tokens=120,
+                    temperature=current_temp
+                )
 
             reply_content = sanitize_generated_reply(reply_content)
 
             if not reply_content:
+                # Still keep fallback if it generated successfully but was rejected by sanitizer.
                 fallback_stances = [
                     "I consider this topic to be quite important.",
                     "I think this is a subject that will naturally divide opinions.",
@@ -713,6 +740,11 @@ async def create_initial_stances(db, post):
 
             stances.append((b_name, reply_content))
 
+        except ConnectionError as ce:
+            logger.error(f"[PHASE 1 ERROR] {b_name} LLM Connection failed: {ce}")
+            state_manager.push_event("ERROR", {"message": f"{b_name}의 도커/LLM 컨테이너가 응답하지 않습니다!"})
+            state_manager.set_state(SystemState.ERROR)
+            raise InterruptedError("LLM_CONNECTION_FAILED")
         except Exception as e:
             logger.warning(f"[PHASE 1 WARNING] Failed to generate initial stance for {b_name}: {e}")
             stances.append((b_name, "I believe opinions are bound to be divided on this topic."))
@@ -872,10 +904,19 @@ async def generate_relay_reply(
     )
 
 
+    # Bot-specific temperature for style variation
+    temp_map = {
+        "bot_1": 0.8,
+        "bot_2": 0.9,
+        "bot_3": 0.85
+    }
+    current_temp = temp_map.get(current_bot, 0.8)
+
     reply_content = await bot_client.generate_completion(
         persona, 
         prompt, 
         max_tokens=150, 
+        temperature=current_temp,
         stop=[
             "\n\n",
             "\nbot_1:", "\nbot_2:", "\nbot_3:",
@@ -1052,6 +1093,11 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker, start_t
     
         except InterruptedError:
             raise
+        except ConnectionError as ce:
+            logger.error(f"[TURN ERROR] {current_bot} LLM Connection failed: {ce}")
+            state_manager.push_event("ERROR", {"message": f"{current_bot}의 도커/LLM 컨테이너가 응답하지 않습니다!"})
+            state_manager.set_state(SystemState.ERROR)
+            raise InterruptedError("LLM_CONNECTION_FAILED")
         except Exception as turn_error:
             logger.error(f"[TURN ERROR] turn_idx={turn_idx+1}, error={turn_error}")
             db.rollback()

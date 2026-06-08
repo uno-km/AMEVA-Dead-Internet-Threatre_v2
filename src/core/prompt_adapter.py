@@ -214,9 +214,24 @@ class PromptAdapter:
         """
         sections = []
 
-        # --- 1. Role Binding ---
+        # --- 1. Role Binding & Role Lock ---
         sections.append(
-            f"You are {current_bot}. You are a sharp and opinionated internet user in an online debate."
+            f"=== ROLE LOCK ===\n"
+            f"You are STRICTLY acting as: {current_bot} (A sharp internet user in a debate).\n"
+            f"You must NEVER switch roles or speak as another agent."
+        )
+
+        # --- 1.5. Bot Style Profile ---
+        style_profile = {
+            "bot_1": "Style: Aggressive, sarcastic, extremely short sentences.",
+            "bot_2": "Style: Analytical, questioning, structured logic.",
+            "bot_3": "Style: Emotional, highly reactive, informal internet slang."
+        }
+        current_style = style_profile.get(current_bot, "Style: Cynical, argumentative.")
+        sections.append(
+            f"=== STYLE PROFILE ===\n"
+            f"{current_style}\n"
+            f"You MUST use a speaking style that is DISTINCT from other agents. Avoid neutral academic phrasing."
         )
 
         # --- 2. Persona ---
@@ -224,16 +239,14 @@ class PromptAdapter:
             persona_short = persona.split("[STRICT COMPLIANCE RULES")[0].strip()
             if len(persona_short) > 250:
                 persona_short = persona_short[:250].rstrip() + "..."
-            sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER describe or mention it explicitly in your reply.)")
+            sections.append(f"Your Personality:\n{persona_short}\n(Behave according to your personality, but NEVER mention it explicitly.)")
 
-        # --- 3. Role Orientation (Phase 3) ---
-        # decode_role_orientation uses stance_roles presets to generate a natural language description
+        # --- 3. Role Orientation & Identity Guarantee (Phase 3) ---
         if role_meta:
             from src.core.stance_roles import decode_role_orientation
             orientation_text = decode_role_orientation(role_meta)
             sections.append(orientation_text)
         else:
-            # Fallback: simple stance from opinion[0]
             opinion = lpde_state.get("opinion", [0.0, 0.0, 0.0, 0.0])
             stance = opinion[0] if len(opinion) > 0 else 0.0
             if stance > 0.3:
@@ -243,24 +256,28 @@ class PromptAdapter:
             else:
                 sections.append("Role Orientation:\n- You are skeptical and nuanced.")
 
+        sections.append(
+            "=== IDENTITY GUARANTEE ===\n"
+            "- Maintain consistent beliefs across turns\n"
+            "- Do not align fully with the opponent unless your role allows it."
+        )
+
         # --- 4. Recent Conversation ---
         if recent_history and recent_history != "No previous conversation.":
             sections.append(f"--- START OF RECENT CONVERSATION ---\n{recent_history}\n--- END OF RECENT CONVERSATION ---")
 
-        # --- 5. Instruction ---
+        # --- 5. Instruction & Claim Anchor ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
-            f"Task: Write a single 1-sentence cynical and argumentative reply challenging the opponent's claims.\n\n"
-            f"CRITICAL GUIDELINES:\n"
-            f"- Speak strictly in character according to your personality described above.\n"
-            f"- Maintain your role orientation throughout your reply — do NOT flip sides.\n"
-            f"- Do not use generic AI templates or polite phrasing.\n\n"
-            f"MANDATORY RULES:\n"
-            f"1. YOU MUST QUOTE: Quote 1-3 words from the opponent's comment in 'quotes' and mock or dismantle it using your persona.\n"
-            f"2. NEVER AGREE: Do not say you agree or that they are right. Strongly dispute their stance.\n"
-            f"3. FORMAT: Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end of your response. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
+            f"Task: Write a single 1-2 sentence cynical reply challenging the opponent's claims.\n\n"
+            f"=== RESPONSE RULE (CLAIM ANCHOR) ===\n"
+            f"You MUST reference a specific part of the opponent's last statement.\n"
             f"Example:\n"
-            f"Your claim about 'social media' is completely flawed and naive. @bot_2\n\n"
+            f"- 'You said X, but that ignores Y...'\n"
+            f"- 'Your claim that X fails because...'\n\n"
+            f"CRITICAL GUIDELINES:\n"
+            f"- Do not use generic AI templates or polite phrasing.\n"
+            f"- Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
             f"Your Reply:"
         )
 

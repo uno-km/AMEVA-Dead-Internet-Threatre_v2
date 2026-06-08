@@ -404,20 +404,36 @@ async def get_system_status():
             status[c] = "RUNNING" if c in running else "STOPPED"
             
         return {
-            "global_state": state_manager.state.value,
+            "state": state_manager.state.value,
             "checkpoint": state_manager.checkpoint.value,
-            **status
+            "is_command_running": state_manager.is_command_running,
+            "last_error": state_manager.last_error_message,
+            "containers": status
         }
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Failed to check docker status: {e}")
+        return {
+            "state": state_manager.state.value,
+            "checkpoint": state_manager.checkpoint.value,
+            "is_command_running": state_manager.is_command_running,
+            "last_error": str(e),
+            "containers": {}
+        }
+
+from pydantic import BaseModel
+
+class NewSessionReq(BaseModel):
+    inference_mode: str = "sequential"
 
 @app.post("/api/control/new")
-async def control_new():
+async def control_new(req: NewSessionReq = None):
     if state_manager.state != SystemState.IDLE:
         return {"error": "명령어 수행중입니다. 동작 못합니다."}
+        
+    mode = req.inference_mode if req else "sequential"
     state_manager.set_state(SystemState.RUNNING)
-    asyncio.create_task(run_session())
-    return {"message": "New session started"}
+    asyncio.create_task(run_session(inference_mode=mode))
+    return {"message": f"New session started (mode: {mode})"}
 
 @app.post("/api/control/pause")
 async def control_pause():
@@ -517,4 +533,30 @@ async def get_bot_trajectory(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=False)
+    import subprocess
+    import os
+    
+    print("[System] 자동 실행: 도커 컨테이너(Dozzle 및 AI 봇들)를 시작합니다...")
+    try:
+        # docker-compose.yml의 web-app을 제외한 나머지 서비스들만 구동 (포트 충돌 방지)
+        # VRAM 최적화 모드: 초기에는 Dozzle(로그 뷰어)만 시작하고 LLM들은 동적으로 구동/종료
+        compose_cmd = [
+            "docker", "compose", "-f", "docker/docker-compose.yml", 
+            "up", "-d", "dozzle"
+        ]
+        subprocess.run(compose_cmd, check=True)
+        print("[System] 도커 컨테이너 구동 완료.")
+    except Exception as e:
+        print(f"[System ERROR] 도커 컨테이너를 시작하는 중 오류 발생: {e}")
+        print("[System] 'docker compose up -d' 명령어를 직접 확인해주세요.")
+
+    try:
+        print("[System] 로컬 웹 서버를 시작합니다...")
+        uvicorn.run("run:app", host="0.0.0.0", port=8050, reload=False)
+    finally:
+        print("\n[System] 서버 종료 감지: 모든 도커 컨테이너를 안전하게 끕니다 (docker compose down)...")
+        try:
+            subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "down"], check=True)
+            print("[System] 도커 컨테이너 종료 완료.")
+        except Exception as e:
+            print(f"[System ERROR] 도커 컨테이너 종료 중 오류 발생: {e}")

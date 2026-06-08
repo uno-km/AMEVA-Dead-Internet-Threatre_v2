@@ -41,6 +41,27 @@ let currentPostId = null;
             return ROLE_LABEL_MAP[role_label] || { label: role_label, cssClass: "role-nihil", emoji: "⚫" };
         }
 
+        let currentErrorToast = null;
+        function showErrorToast(msg) {
+            if (currentErrorToast === msg) return;
+            currentErrorToast = msg;
+            
+            // Remove existing toast if any
+            const existing = document.getElementById('error-toast-ui');
+            if (existing) existing.remove();
+            
+            const toast = document.createElement('div');
+            toast.id = 'error-toast-ui';
+            toast.className = 'fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600 text-white font-bold px-8 py-4 rounded-2xl shadow-[0_0_20px_rgba(220,38,38,0.8)] z-[100] animate-bounce flex flex-col items-center gap-2 border-4 border-red-400';
+            toast.innerHTML = `
+                <div class="text-4xl mb-2">⚠️</div>
+                <div class="text-xl">시스템 오류 감지</div>
+                <div class="text-sm opacity-90">${msg}</div>
+                <button onclick="this.parentElement.remove(); currentErrorToast=null;" class="mt-4 px-4 py-1 bg-white text-red-600 rounded-full text-xs uppercase hover:bg-gray-100">닫기</button>
+            `;
+            document.body.appendChild(toast);
+        }
+
         // --- Fetch System Status ---
         async function fetchSystemStatus() {
             try {
@@ -50,13 +71,18 @@ let currentPostId = null;
                 let godRunning = systemStatusMap["ameva-llm-god"] === "RUNNING";
                 let mainRunning = systemStatusMap["ameva-llm-main"] === "RUNNING";
                 
-                let globalState = systemStatusMap["global_state"] || "UNKNOWN";
+                let globalState = systemStatusMap["state"] || systemStatusMap["global_state"] || "UNKNOWN";
+                let lastError = systemStatusMap["last_error"];
+                
                 let globalBadge = document.getElementById('global-state-badge');
                 globalBadge.textContent = globalState;
                 if(globalState === "RUNNING") {
                     globalBadge.className = "ml-2 text-xs px-2 py-1 rounded-full font-bold bg-green-500 text-white shadow-[0_0_8px_rgba(34,197,94,0.6)] animate-pulse";
                 } else if(globalState === "PAUSED" || globalState === "PAUSING") {
                     globalBadge.className = "ml-2 text-xs px-2 py-1 rounded-full font-bold bg-yellow-500 text-white shadow-[0_0_8px_rgba(234,179,8,0.6)]";
+                } else if(globalState === "ERROR") {
+                    globalBadge.className = "ml-2 text-xs px-2 py-1 rounded-full font-bold bg-red-600 text-white animate-pulse shadow-[0_0_8px_rgba(220,38,38,0.8)]";
+                    if (lastError) showErrorToast(lastError);
                 } else {
                     globalBadge.className = "ml-2 text-xs px-2 py-1 rounded-full font-bold bg-gray-200 text-gray-600";
                 }
