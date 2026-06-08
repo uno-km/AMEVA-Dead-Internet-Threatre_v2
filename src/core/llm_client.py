@@ -85,10 +85,12 @@ class LLMClient:
             async with httpx.AsyncClient() as client:
                 for _ in range(120):
                     try:
-                        res = await client.get(f"{self.base_url}/v1/models", timeout=2.0)
+                        res = await client.get(f"{self.base_url}/health", timeout=2.0)
                         if res.status_code == 200:
-                            logger.info(f"[LIFECYCLE] '{self.container_name}' API is ready.")
-                            return
+                            data = res.json()
+                            if data.get("status") == "ok":
+                                logger.info(f"[LIFECYCLE] '{self.container_name}' API is ready.")
+                                return
                     except httpx.RequestError:
                         pass
                     await asyncio.sleep(2.0)
