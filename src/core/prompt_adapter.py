@@ -221,17 +221,30 @@ class PromptAdapter:
             f"You must NEVER switch roles or speak as another agent."
         )
 
-        # --- 1.5. Bot Style Profile ---
+        # --- 1.5. Bot Style Profile (Anti-Template & Lexical Banks) ---
         style_profile = {
-            "bot_1": "Style: Aggressive, sarcastic, extremely short sentences.",
-            "bot_2": "Style: Analytical, questioning, structured logic.",
-            "bot_3": "Style: Emotional, highly reactive, informal internet slang."
+            "bot_1": (
+                "Style: Aggressive, short, direct. Uses rhetorical questions, but NEVER uses sarcastic quotes.\n"
+                "Forbidden phrases: 'So you think', 'Wow, what a genius', 'That's rich coming from', 'Newsflash'."
+            ),
+            "bot_2": (
+                "Style: Analytical, questioning, heavily logical. Points out specific fallacies. Formal internet tone.\n"
+                "Forbidden phrases: 'So you think', 'Wow', 'That's rich', 'Genius', 'Cute', 'Desperate'."
+            ),
+            "bot_3": (
+                "Style: Emotional, highly reactive, uses lowercase internet slang (rn, cuz, tho, wtf).\n"
+                "Forbidden phrases: 'So you think', 'Genius', 'That's rich', 'Newsflash'."
+            )
         }
         current_style = style_profile.get(current_bot, "Style: Cynical, argumentative.")
         sections.append(
             f"=== STYLE PROFILE ===\n"
             f"{current_style}\n"
-            f"You MUST use a speaking style that is DISTINCT from other agents. Avoid neutral academic phrasing."
+            f"CRITICAL RULES TO AVOID AI REPETITION:\n"
+            f"1. NEVER start your sentence with 'So you think...' or 'Wow...'\n"
+            f"2. NEVER use the phrase 'That's rich coming from someone...'\n"
+            f"3. NEVER repeat the opponent's insult back at them.\n"
+            f"4. Be highly original. Speak like a real human on Reddit/4chan, not an AI acting like a troll."
         )
 
         # --- 2. Persona ---
@@ -269,14 +282,10 @@ class PromptAdapter:
         # --- 5. Instruction & Claim Anchor ---
         other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
         sections.append(
-            f"Task: Write a single 1-2 sentence cynical reply challenging the opponent's claims.\n\n"
-            f"=== RESPONSE RULE (CLAIM ANCHOR) ===\n"
-            f"You MUST reference a specific part of the opponent's last statement.\n"
-            f"Example:\n"
-            f"- 'You said X, but that ignores Y...'\n"
-            f"- 'Your claim that X fails because...'\n\n"
+            f"Task: Write a single 1-2 sentence cynical reply challenging the opponent's core logic.\n\n"
             f"CRITICAL GUIDELINES:\n"
-            f"- Do not use generic AI templates or polite phrasing.\n"
+            f"- DO NOT quote the opponent. Attack their idea directly without repeating their words.\n"
+            f"- DO NOT use generic AI templates, rhetorical questions, or polite phrasing.\n"
             f"- Mention ONE of {', '.join(['@' + b for b in other_bots])} at the very end. Do NOT add speaker prefixes (like '{current_bot}:').\n\n"
             f"Your Reply:"
         )

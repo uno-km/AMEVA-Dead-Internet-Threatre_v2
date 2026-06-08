@@ -61,7 +61,11 @@ def main():
     print("========================================")
     print("Commands:")
     print("  run            - Check system status")
-    print("  new            - Start a new session")
+    print("  new [args]     - Start a new session. Available args:")
+    print("                     local : Run a single shared LLM model for all bots")
+    print("                     mode=<val> : Set model mode (e.g., mode=high)")
+    print("                     chat=<val> : Set chat mode (concurrent or sequential)")
+    print("                     [!] Example: new local mode=high chat=sequential")
     print("  pause          - Soft pause the current session")
     print("  resume         - Resume a paused session")
     print("  stop           - Force stop the current session")
@@ -83,18 +87,27 @@ def main():
             elif cmd == "run":
                 get_status()
             elif cmd == "new":
-                # 파라미터 파싱 (예: new local, new mode=high)
-                payload = {}
+                # 파라미터 파싱 (예: new local mode=high chat=sequential)
+                payload = {
+                    "inference_mode": "sequential",  # default
+                    "model_mode": "standard",        # default
+                    "chat_mode": "sequential"        # default
+                }
+                
                 if len(user_input) > 1:
-                    if "local" in user_input:
-                        payload["inference_mode"] = "local_single_model"
+                    for arg in user_input[1:]:
+                        if arg == "local":
+                            payload["inference_mode"] = "local_single_model"
+                        elif arg.startswith("mode="):
+                            payload["model_mode"] = arg.split("=")[1]
+                        elif arg.startswith("chat="):
+                            payload["chat_mode"] = arg.split("=")[1]
                 
                 url = "http://localhost:8050/api/control/new"
                 req = urllib.request.Request(url, method="POST")
-                if payload:
-                    data = json.dumps(payload).encode('utf-8')
-                    req.add_header('Content-Type', 'application/json')
-                    req.data = data
+                data = json.dumps(payload).encode('utf-8')
+                req.add_header('Content-Type', 'application/json')
+                req.data = data
                     
                 try:
                     with urllib.request.urlopen(req) as response:

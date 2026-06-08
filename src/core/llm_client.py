@@ -4,8 +4,12 @@ import subprocess
 import asyncio
 from contextlib import asynccontextmanager
 
-single_llm_lock = asyncio.Semaphore(1)
+_endpoint_locks = {}
 
+def get_endpoint_lock(base_url: str) -> asyncio.Semaphore:
+    if base_url not in _endpoint_locks:
+        _endpoint_locks[base_url] = asyncio.Semaphore(1)
+    return _endpoint_locks[base_url]
 logger = logging.getLogger("LLMClient")
 
 class LLMClient:
@@ -21,7 +25,7 @@ class LLMClient:
         user_prompt: str,
         max_tokens: int = 512,
         stop=None,
-        timeout: float = None,
+        timeout: float = 180.0,
         response_format=None,
         temperature: float = 0.8
     ) -> str:
@@ -47,7 +51,8 @@ class LLMClient:
 
         req_timeout = timeout if timeout is not None else self.timeout
 
-        async with single_llm_lock:
+        endpoint_lock = get_endpoint_lock(self.base_url)
+        async with endpoint_lock:
             try:
                 logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens}, Timeout: {req_timeout}, Temp: {temperature})")
                 async with httpx.AsyncClient(timeout=req_timeout) as client:
@@ -76,9 +81,9 @@ class LLMClient:
             subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "up", "-d", service_name], check=True, capture_output=True)
             logger.info(f"[LIFECYCLE] '{self.container_name}' started. Waiting for API readiness...")
             
-            # API 준비 대기 (Max 60 seconds)
+            # API 준비 대기 (Max 120 seconds)
             async with httpx.AsyncClient() as client:
-                for _ in range(30):
+                for _ in range(120):
                     try:
                         res = await client.get(f"{self.base_url}/v1/models", timeout=2.0)
                         if res.status_code == 200:

@@ -30,19 +30,23 @@ from src.orchestration.context_builder import (
 from src.core.prompt_adapter import prompt_adapter
 from src.orchestration.state_manager import state_manager, SystemState, Checkpoint
 
+from dataclasses import dataclass
+from src.core.llm_client import LLMClient
+
+@dataclass
+class SessionContext:
+    inference_mode: str
+    main_llm: LLMClient
+    god_llm: LLMClient
+    bots: dict
+    session_id: int | None = None
+
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("Orchestrator")
 
-main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
-#police_llm = LLMClient("http://localhost:8106", "ameva-llm-police")
-god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
 
-bots = {
-    "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
-    "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
-    "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
-}
 
 def docker_start(container_name: str) -> bool:
     try:
@@ -272,8 +276,8 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
         f"}}"
     )
 
-    async with god_llm.lifecycle():
-        result = await god_llm.generate_completion(
+    async with ctx.god_llm.lifecycle():
+        result = await ctx.god_llm.generate_completion(
             "You are an AI that quantifies emotional reactions.",
             prompt,
             max_tokens=150
@@ -310,7 +314,7 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
 
         data = json.loads(json_str)
 
-        def parse_entry(raw_val, default_target):
+        def parse_entry(ctx: SessionContext, raw_val, default_target):
             increase = 0
             target = default_target
 
@@ -357,11 +361,11 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
     out = {
         spec_1: {
             "increase": val_1,
-            "target": target_1 if target_1 in bots else speaker
+            "target": target_1 if target_1 in ctx.bots else speaker
         },
         spec_2: {
             "increase": val_2,
-            "target": target_2 if target_2 in bots else speaker
+            "target": target_2 if target_2 in ctx.bots else speaker
         }
     }
 
@@ -370,7 +374,7 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
     return out
 
 async def check_police_dispatch(db) -> bool:
-    """Check if 2 or more bots have Effective Anger >= 100"""
+    """Check if 2 or more ctx.bots have Effective Anger >= 100"""
     try:
         states = db.query(BotState).all()
     except Exception as e:
@@ -424,16 +428,16 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
         states = db.query(BotState).all()
     except Exception as e:
         logger.error(f"[QUEUE ERROR] Failed to load BotState rows: {e}")
-        fallback_candidates = [b for b in bots.keys() if b != last_speaker]
+        fallback_candidates = [b for b in ctx.bots.keys() if b != last_speaker]
         if fallback_candidates:
             chosen = random.choice(fallback_candidates)
             logger.info(f"[QUEUE] DB fallback speaker selected: {chosen}")
             return chosen
-        chosen = random.choice(list(bots.keys()))
+        chosen = random.choice(list(ctx.bots.keys()))
         logger.info(f"[QUEUE] Hard fallback speaker selected: {chosen}")
         return chosen
 
-    anger_info = {b: 0.0 for b in bots.keys()}
+    anger_info = {b: 0.0 for b in ctx.bots.keys()}
 
     for s in states:
         try:
@@ -469,13 +473,13 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
             if getattr(s, "bot_name", None) in anger_info:
                 anger_info[s.bot_name] = 0.0
 
-    candidates = [b for b in bots.keys() if b != last_speaker]
+    candidates = [b for b in ctx.bots.keys() if b != last_speaker]
     # 모든 봇이 제외되는 이상 케이스 방어
     if not candidates:
-        candidates = list(bots.keys())
+        candidates = list(ctx.bots.keys())
     # 그래도 비어 있으면 치명적 설정 오류
     if not candidates:
-        raise RuntimeError("No available bots found in 'bots' dictionary.")
+        raise RuntimeError("No available ctx.bots found in 'ctx.bots' dictionary.")
     # tie 편향 방지: 먼저 섞고 정렬
     random.shuffle(candidates)
     # Sort candidates by effective anger
@@ -525,14 +529,14 @@ def normalize_post_content(text: str) -> str:
         logger.warning(f"[POST WARNING] Failed to normalize post content: {e}")
         return ""
 
-async def create_post_with_main_llm(db, session):
+async def create_post_with_main_llm(ctx: SessionContext, db, session):
     logger.info("[ROUTING] Requesting llm-main (8B) to generate a new topic...")
 
     post_content = ""
     title = "새로운 논쟁 거리"
 
     try:
-        async with main_llm.lifecycle():
+        async with ctx.main_llm.lifecycle():
             prompt = (
                 "You are an anonymous community forum user. Write a highly engaging, catchy, and controversial post on a random trending/opinionated topic. Write in English only.\n"
                 "You MUST output your response ONLY as a valid JSON object in the exact format below, with no other text:\n"
@@ -541,7 +545,7 @@ async def create_post_with_main_llm(db, session):
                 '  "content": "Your post content details..."\n'
                 "}"
             )
-            result = await main_llm.generate_completion(
+            result = await ctx.main_llm.generate_completion(
                 "You are an AI that writes forum posts. You only respond in JSON format.",
                 prompt,
                 max_tokens=500,
@@ -569,26 +573,24 @@ async def create_post_with_main_llm(db, session):
                         post_content = data.get("content", "").strip()
                     except json.JSONDecodeError as e:
                         logger.error(f"[LLM-MAIN] JSON 디코딩 실패. Raw: {result} | Error: {e}")
+                        # Robust Regex fallback
+                        title_match = re.search(r'["\']?title["\']?\s*:\s*["\']((?:[^"\'\\]|\\.)*)["\']', json_str, re.DOTALL | re.IGNORECASE)
+                        content_match = re.search(r'["\']?content["\']?\s*:\s*["\']((?:[^"\'\\]|\\.)*)["\']', json_str, re.DOTALL | re.IGNORECASE)
+                        if title_match: title = title_match.group(1).replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').strip()
+                        if content_match: post_content = content_match.group(1).replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').strip()
                 else:
                     logger.error(f"[LLM-MAIN] JSON 블록을 찾지 못했습니다. Raw: {result}")
+                    # Robust Regex fallback on raw result
+                    title_match = re.search(r'["\']?title["\']?\s*:\s*["\']((?:[^"\'\\]|\\.)*)["\']', result, re.DOTALL | re.IGNORECASE)
+                    content_match = re.search(r'["\']?content["\']?\s*:\s*["\']((?:[^"\'\\]|\\.)*)["\']', result, re.DOTALL | re.IGNORECASE)
+                    if title_match: title = title_match.group(1).replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').strip()
+                    if content_match: post_content = content_match.group(1).replace('\\"', '"').replace("\\'", "'").replace('\\n', '\n').strip()
     except Exception as e:
         logger.error(f"[LLM-MAIN] Error generating topic: {e}")
 
-    # Fallback 로직
+    # Fallback 로직 제거 - 오류를 명시적으로 발생시킴
     if not post_content:
-        fallback_topics = [
-            ("AI and Jobs", "Is it really a good thing that AI is replacing human jobs?"),
-            ("Modern Manners", "Do you agree that the younger generation has no manners these days?"),
-            ("Marriage in Modern Times", "With housing prices so high, is marriage really necessary?"),
-            ("Pedigree vs Skills", "What's more important: academic pedigree or actual skills? Let's be honest."),
-            ("Pets vs Children", "Are people who raise pets more selfish than people who raise children?"),
-            ("Military Service", "Should mandatory military service be abolished or maintained?"),
-            ("Content Creators", "Can being a YouTuber or streamer really be considered a real job?"),
-            ("Minimum Wage", "Is the minimum wage for convenience store workers too low, or appropriate?"),
-        ]
-        fallback_item = random.choice(fallback_topics)
-        title = fallback_item[0]
-        post_content = fallback_item[1]
+        raise RuntimeError(f"[LLM-MAIN] 게시글 생성 실패. LLM 출력물: {result}")
 
     post_content = normalize_post_content(post_content)
 
@@ -602,31 +604,35 @@ async def create_post_with_main_llm(db, session):
 
 
 async def run_session(inference_mode: str = "sequential"):
-    global bots, main_llm, god_llm
-    
     if inference_mode == "local_single_model":
         logger.info("[MODE] Starting in local_single_model mode. All agents will share ameva-llm-main.")
         shared_client = LLMClient("http://localhost:8101", "ameva-llm-main")
         shared_client.auto_lifecycle = False  # Disable lifecycle, assuming it's kept alive
         
-        main_llm = shared_client
-        god_llm = shared_client
-        bots = {
-            "bot_1": shared_client,
-            "bot_2": shared_client,
-            "bot_3": shared_client
-        }
+        ctx = SessionContext(
+            inference_mode=inference_mode,
+            main_llm=shared_client,
+            god_llm=shared_client,
+            bots={
+                "bot_1": shared_client,
+                "bot_2": shared_client,
+                "bot_3": shared_client
+            }
+        )
         # Start it once if not running
         await shared_client.start_container()
     else:
         # Default sequential
-        main_llm = LLMClient("http://localhost:8101", "ameva-llm-main")
-        god_llm = LLMClient("http://localhost:8105", "ameva-llm-god")
-        bots = {
-            "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
-            "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
-            "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
-        }
+        ctx = SessionContext(
+            inference_mode=inference_mode,
+            main_llm=LLMClient("http://localhost:8101", "ameva-llm-main"),
+            god_llm=LLMClient("http://localhost:8105", "ameva-llm-god"),
+            bots={
+                "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
+                "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
+                "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+            }
+        )
 
     db = SessionLocal()
     try:
@@ -651,14 +657,14 @@ async def run_session(inference_mode: str = "sequential"):
         personality_engine.initialize_session_states(db, session.id, role_triplet)
 
         state_manager.current_session_id = session.id
-        post = await create_post_with_main_llm(db, session)
+        post = await create_post_with_main_llm(ctx, db, session)
         await state_manager.wait_at_checkpoint(Checkpoint.TOPIC_GEN_DONE)
 
         # 신 LLM 및 봇들은 필요할 때만 개별적으로 켜고 끄도록 수정 (Lifecycle 적용됨)
-        stances, last_comment, last_speaker = await create_initial_stances(db, post)
+        stances, last_comment, last_speaker = await create_initial_stances(ctx, db, post)
         await state_manager.wait_at_checkpoint(Checkpoint.PHASE1_DONE)
 
-        await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0)
+        await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=0)
 
         logger.info("[ORCHESTRATOR] [SESSION END] Completed relay phase.")
         state_manager.set_state(SystemState.IDLE)
@@ -674,7 +680,7 @@ async def run_session(inference_mode: str = "sequential"):
     finally:
         db.close()
 
-async def create_initial_stances(db, post):
+async def create_initial_stances(ctx: SessionContext, db, post):
     logger.info("[PHASE 1] Initial Stance Declaration (Sequential & Random)")
 
     stances = []
@@ -687,7 +693,7 @@ async def create_initial_stances(db, post):
         await smart_sleep()
         try:
             persona = await PersonaManager.get_persona(b_name)
-            bot_client = bots[b_name]
+            bot_client = ctx.bots[b_name]
 
             # Load agent state to read the pre-assigned stance
             agent_state = personality_engine.load_agent_state(db, post.session_id, b_name)
@@ -780,11 +786,11 @@ async def create_initial_stances(db, post):
 
 
 async def generate_relay_reply(
-    db, post, current_bot, turn_idx=0,
+    ctx: SessionContext, db, post, current_bot, turn_idx=0,
     last_comment_text=None, last_speaker=None
 ):
     persona = await PersonaManager.get_persona(current_bot)
-    bot_client = bots[current_bot]
+    bot_client = ctx.bots[current_bot]
 
     # [LPDE Feature Flags]
     LPDE_STRUCTURED_HISTORY = os.getenv("LPDE_STRUCTURED_HISTORY", "true").lower() == "true"
@@ -849,7 +855,7 @@ async def generate_relay_reply(
             should_intervene = (turn_idx % 3 == 0 and turn_idx > 0) or tension_val > 0.6
             if should_intervene:
                 intervention = await generate_intervention_json(
-                    god_llm, current_bot, lpde_state, recent_history, arousal_val
+                    ctx.god_llm, current_bot, lpde_state, recent_history, arousal_val
                 )
                 if intervention:
                     apply_intervention(db, post.session_id, turn_idx, intervention)
@@ -944,8 +950,8 @@ async def generate_relay_reply(
 
     return reply_content, mentioned
 
-async def apply_spectator_anger(db, current_bot, reply_content):
-    spectators = [b for b in bots.keys() if b != current_bot]
+async def apply_spectator_anger(ctx: SessionContext, db, current_bot, reply_content):
+    spectators = [b for b in ctx.bots.keys() if b != current_bot]
     anger_increases = await evaluate_spectator_anger(current_bot, reply_content, spectators)
 
     for spec_name, data in anger_increases.items():
@@ -995,7 +1001,7 @@ async def apply_spectator_anger(db, current_bot, reply_content):
 async def close_session_if_police_dispatch(db, session):
     if await check_police_dispatch(db):
         logger.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        logger.warning("[POLICE DISPATCH] 2 or more bots reached 100+ Effective Anger!")
+        logger.warning("[POLICE DISPATCH] 2 or more ctx.bots reached 100+ Effective Anger!")
         logger.warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         session.status = "CLOSED_BY_POLICE"
@@ -1006,7 +1012,7 @@ async def close_session_if_police_dispatch(db, session):
 
     return False
 
-def save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, mentioned):
+def save_relay_comment(ctx: SessionContext, db, post, parent_comment_id, current_bot, reply_content, mentioned):
     c = Comment(
         post_id=post.id,
         parent_id=parent_comment_id,
@@ -1048,7 +1054,7 @@ def save_session_bot_state(db, session_id: int, turn_idx: int):
         db.add(record)
     db.commit()
 
-async def run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=0):
+async def run_relay_phase(ctx: SessionContext, db, session, post, last_comment, last_speaker, start_turn_idx=0):
     logger.info(f"[PHASE 2] Targeted Anger Battle Started (Start Turn: {start_turn_idx})")
 
     candidates_for_mention = [b for b in ["bot_1", "bot_2", "bot_3"] if b != last_speaker]
@@ -1070,9 +1076,9 @@ async def run_relay_phase(db, session, post, last_comment, last_speaker, start_t
                     last_speaker=last_speaker,
                 )
                 
-                c = save_relay_comment(db, post, parent_comment_id, current_bot, reply_content, mentioned)
+                c = save_relay_comment(ctx, db, post, parent_comment_id, current_bot, reply_content, mentioned)
     
-                await apply_spectator_anger(db, current_bot, reply_content)
+                await apply_spectator_anger(ctx, db, current_bot, reply_content)
     
                 save_session_bot_state(db, session.id, turn_idx)
                 
@@ -1296,7 +1302,7 @@ async def restart_session(session_id: int):
         # 신 LLM 및 봇들을 상시 켜둠
         async with llm_lifecycle("ameva-llm-god", 8105):
             async with multi_llm_lifecycle(bot_targets):
-                await run_relay_phase(db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
+                await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
         
         logger.info("[ORCHESTRATOR] [RESTART END] Completed relay phase.")
         state_manager.set_state(SystemState.IDLE)

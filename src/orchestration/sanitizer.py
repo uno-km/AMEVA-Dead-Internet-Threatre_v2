@@ -224,36 +224,5 @@ def force_single_mention(text: str, current_bot: str) -> tuple[str, str]:
 
 def enforce_fallback(text: str, current_bot: str) -> str:
     if not text or not text.strip():
-        # Bot-specific fallbacks to prevent "role bleed" when AI refuses to generate
-        fallbacks = {
-            "bot_1": [
-                "That makes zero sense. Try again.",
-                "Are you even listening to yourself right now?",
-                "This logic is so flawed it's almost funny.",
-                "You literally just made that up. Where's the proof?",
-                "I can't believe anyone actually thinks this way."
-            ],
-            "bot_2": [
-                "There seems to be a missing piece in your reasoning right now.",
-                "You need to provide clearer evidence for that claim.",
-                "I must question the fundamental assumptions you are making here.",
-                "Let's refocus the discussion. What exactly are you trying to prove?",
-                "Can you justify your opinion without relying on assumptions?"
-            ],
-            "bot_3": [
-                "bro u serious rn?? that's completely ridiculous 💀",
-                "I can't even with this take rn. honestly just stop.",
-                "lmao what is this logic?? making zero sense to me.",
-                "why are people actually agreeing with this?? 😭",
-                "this is getting nowhere, I'm literally so done."
-            ]
-        }
-        
-        # Default pool if somehow current_bot is unmapped
-        default_pool = fallbacks.get(current_bot, fallbacks["bot_1"])
-        
-        candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
-        chosen = random.choice(candidates) if candidates else "bot_1"
-        chosen_reply = random.choice(default_pool)
-        return f"{chosen_reply} @{chosen}"
+        raise RuntimeError(f"[LLM-BOT] {current_bot} 생성 실패 (결과값 없음).")
     return text

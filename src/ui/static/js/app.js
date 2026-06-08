@@ -502,12 +502,12 @@ let currentPostId = null;
             `;
             document.getElementById('inspector-summary-chips').innerHTML = chipsHtml;
 
-            const rValence = isAffectActive ? (getSafeVal(t.affect, 0) || 0) : null;
-            const rArousal = isAffectActive ? (getSafeVal(t.affect, 1) || 0) : null;
-            const rStance = isOpinionActive ? (getSafeVal(t.opinion, 0) || 0) : null;
-            const rConviction = isOpinionActive ? (getSafeVal(t.opinion, 1) || 0) : null;
-            const rSelf = isPowerActive ? (getSafeVal(t.power, 0) || 0) : null;
-            const rSys = isPowerActive ? (getSafeVal(t.power, 1) || 0) : null;
+            const rValence = isAffectActive ? (getSafeVal(t.affect, 0) || 0) : 0;
+            const rArousal = isAffectActive ? (getSafeVal(t.affect, 1) || 0) : 0;
+            const rStance = isOpinionActive ? (getSafeVal(t.opinion, 0) || 0) : 0;
+            const rConviction = isOpinionActive ? (getSafeVal(t.opinion, 1) || 0) : 0;
+            const rSelf = isPowerActive ? (getSafeVal(t.power, 0) || 0) : 0;
+            const rSys = isPowerActive ? (getSafeVal(t.power, 1) || 0) : 0;
 
             const radarData = [rValence, rArousal, rStance, rConviction, rSelf, rSys];
 

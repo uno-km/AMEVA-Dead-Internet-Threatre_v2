@@ -19,12 +19,7 @@ services:
       - PYTHONPATH=/AMEVA-DeadInternetSociety
       # NOTE: LPDE_FULL_PROMPT and LPDE_LEGACY_PROMPT flags are removed in Phase 2
       # The system now always runs in Phase 2 with full LPDE prompt.
-    depends_on:
-      - llm-main
-      - llm-bot-1
-      - llm-bot-2
-      - llm-bot-3
-      - llm-god
+
     networks:
       - ameva_net
     restart: always
@@ -48,7 +43,7 @@ services:
       - "8102:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -c 4096 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -60,7 +55,7 @@ services:
       - "8103:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -c 4096 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no
@@ -72,7 +67,7 @@ services:
       - "8104:8080"
     volumes:
       - ../../models:/models
-    command: -m /models/qwen2.5-3b-instruct-q4_k_m.gguf -c 2048 --host 0.0.0.0 --port 8080
+    command: -m /models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf -c 4096 --host 0.0.0.0 --port 8080
     networks:
       - ameva_net
     restart: no

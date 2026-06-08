@@ -424,16 +424,21 @@ from pydantic import BaseModel
 
 class NewSessionReq(BaseModel):
     inference_mode: str = "sequential"
+    model_mode: str = "standard"
+    chat_mode: str = "sequential"
 
 @app.post("/api/control/new")
 async def control_new(req: NewSessionReq = None):
     if state_manager.state != SystemState.IDLE:
         return {"error": "명령어 수행중입니다. 동작 못합니다."}
         
-    mode = req.inference_mode if req else "sequential"
+    inf_mode = req.inference_mode if req else "sequential"
+    mod_mode = req.model_mode if req else "standard"
+    ch_mode = req.chat_mode if req else "sequential"
+    
     state_manager.set_state(SystemState.RUNNING)
-    asyncio.create_task(run_session(inference_mode=mode))
-    return {"message": f"New session started (mode: {mode})"}
+    asyncio.create_task(run_session(inference_mode=inf_mode))
+    return {"message": f"New session started (inference: {inf_mode}, model: {mod_mode}, chat: {ch_mode})"}
 
 @app.post("/api/control/pause")
 async def control_pause():
