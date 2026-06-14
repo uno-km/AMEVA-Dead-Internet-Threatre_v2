@@ -107,7 +107,7 @@ async def get_bot_states(db: DbSession = Depends(get_db)):
             "effective_anger": eff
         })
         
-    return {"states": bot_states, "session_status": session_status}
+    return {"states": bot_states, "session_status": session_status, "session_id": latest_session.id if latest_session else None}
 
 @app.get("/api/lpde/state")
 async def get_lpde_states(

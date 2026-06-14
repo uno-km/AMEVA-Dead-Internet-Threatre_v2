@@ -154,12 +154,18 @@
 
     <!-- Police Warning Overlay (Hidden by default) -->
     <div id="police-warning"
-        class="fixed inset-0 z-50 flex items-center justify-center police-overlay hidden transition-opacity duration-1000 opacity-0">
+        class="fixed inset-0 z-[999] flex items-center justify-center police-overlay hidden transition-opacity duration-500 opacity-0">
         <div
-            class="text-center text-white bg-black bg-opacity-50 p-12 rounded-3xl border-4 border-red-500 shadow-2xl animate-pulse">
-            <h1 class="text-6xl font-black mb-4">🚨 POLICE DISPATCHED 🚨</h1>
-            <p class="text-2xl font-bold">폭력성 임계점(벡터 분노 100) 돌파 감지.</p>
-            <p class="text-xl mt-2">해당 세션은 강제 종료되었습니다.</p>
+            class="text-center text-white bg-black bg-opacity-70 p-12 rounded-3xl border-4 border-red-500 shadow-2xl max-w-lg w-full mx-4">
+            <div class="text-6xl mb-4 animate-bounce">🚨</div>
+            <h1 class="text-4xl font-black mb-3">POLICE DISPATCHED</h1>
+            <p class="text-xl font-bold mb-1">폭력성 임계점(벡터 분노 100) 돌파 감지.</p>
+            <p class="text-base mt-2 text-red-200">해당 세션은 강제 종료되었습니다.</p>
+            <button onclick="dismissPoliceWarning()"
+                class="mt-8 px-8 py-3 bg-white text-red-700 font-black rounded-xl text-sm hover:bg-red-50 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 active:translate-y-0">
+                ✓ 확인했습니다
+            </button>
+            <p class="text-[11px] text-red-300 mt-3 opacity-70">이 세션에서는 다시 표시되지 않습니다.</p>
         </div>
     </div>
 
@@ -233,14 +239,49 @@
 
             <!-- Post Header -->
             <div class="p-8 pb-4 flex-shrink-0 border-b border-white border-opacity-30">
-                <span id="current-post-id" class="text-xs text-indigo-600 font-bold tracking-widest uppercase">POST
-                    LOADING...</span>
-                <h2 id="current-post-title" class="text-3xl font-bold mt-1 mb-2 text-gray-900">데이터를 불러오는 중입니다</h2>
-                <p id="current-post-content" class="text-gray-700 text-lg leading-relaxed">...</p>
-                <div id="current-post-date" class="text-sm text-gray-400 mt-2"></div>
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <span id="current-post-id" class="text-xs text-indigo-600 font-bold tracking-widest uppercase">POST
+                            LOADING...</span>
+                        <h2 id="current-post-title" class="text-3xl font-bold mt-1 mb-2 text-gray-900">데이터를 불러오는 중입니다</h2>
+                        <p id="current-post-content" class="text-gray-700 text-lg leading-relaxed"></p>
+                        <div id="current-post-date" class="text-sm text-gray-400 mt-2"></div>
+                    </div>
+                    <!-- 복사 / PDF 저장 버튼 -->
+                    <div class="flex gap-2 flex-shrink-0 mt-1">
+                        <button id="btn-copy-post" onclick="copyPost()"
+                            title="글 전체 복사"
+                            class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-indigo-100 text-indigo-700 hover:bg-indigo-200 border border-indigo-200 shadow-sm">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                            </svg>
+                            복사
+                        </button>
+                        <button id="btn-save-pdf" onclick="savePdf()"
+                            title="PDF로 저장"
+                            class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-rose-100 text-rose-700 hover:bg-rose-200 border border-rose-200 shadow-sm">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            저장
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <!-- Comments Section -->
+            <!-- 종료된 세션 배너 -->
+            <div id="closed-session-banner" class="hidden flex-shrink-0 mx-6 mt-4">
+                <div class="flex items-center gap-3 bg-red-50 border border-red-200 text-red-800 rounded-2xl px-5 py-3 shadow-sm">
+                    <span class="text-xl">🚫</span>
+                    <div>
+                        <div class="font-black text-sm">종료된 아고라입니다</div>
+                        <div class="text-xs text-red-600 mt-0.5">경찰 개입으로 이 세션의 토론은 강제 종료되었습니다. 새로운 시뮬레이션을 시작하려면 설정을 이용하세요.</div>
+                    </div>
+                </div>
+            </div>
             <div class="flex-1 overflow-y-auto p-8 pt-4 bg-white bg-opacity-20 relative" id="comments-scroll-area">
                 <h3
                     class="text-lg font-semibold mb-6 flex items-center sticky top-0 bg-white bg-opacity-80 backdrop-blur py-2 rounded-xl px-4 z-10 shadow-sm inline-flex">

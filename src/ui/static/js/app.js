@@ -26,6 +26,7 @@ let currentPostId = null;
         let compArousalChartInstance = null;
         let compTrajectoryData = {};  // {bot_1: [...points], bot_2: [...], bot_3: [...]}
         let allTurnIndices = [];
+        let lastPostData = null; // 현재 보고 있는 게시글 데이터 (복사/저장용)
 
         const ROLE_LABEL_MAP = {
             "pole_a_hardliner":        { label: "Pole A Hardliner", cssClass: "role-pole-a", emoji: "🔴" },
@@ -67,6 +68,11 @@ let currentPostId = null;
 
         let setupModalOpen = false;
         let setupPolling = null;
+
+        // 경찰 오버레이 관련 상태
+        let dismissedPoliceSessions = new Set(); // 이미 닫은 세션 ID 목록
+        let policeWarningVisible = false;        // 현재 화면에 표시 중인지 여부
+        let currentSessionId = null;             // 현재 폴링 중인 세션 ID
 
         // --- Fetch System Status ---
         async function fetchSystemStatus() {
@@ -122,14 +128,23 @@ let currentPostId = null;
                         badge.className = "text-xs px-2 py-1 rounded-full font-bold bg-green-200 text-green-800";
                         badge.innerText = "ACTIVE";
                         hidePoliceWarning();
+                        hideClosedBanner();
                     } else if (data.session_status === 'CLOSED_BY_POLICE') {
                         badge.className = "text-xs px-2 py-1 rounded-full font-bold bg-red-600 text-white animate-pulse";
                         badge.innerText = "POLICE DISPATCHED";
-                        showPoliceWarning();
+                        // 현재 세션 ID 추적
+                        const sid = data.session_id || '__police__';
+                        currentSessionId = sid;
+                        // 이미 닫은 세션이면 다시 안 또 담
+                        if (!dismissedPoliceSessions.has(sid) && !policeWarningVisible) {
+                            showPoliceWarning(sid);
+                        }
+                        showClosedBanner();
                     } else {
                         badge.className = "text-xs px-2 py-1 rounded-full font-bold bg-gray-200 text-gray-600";
                         badge.innerText = data.session_status || "UNKNOWN";
                         hidePoliceWarning();
+                        hideClosedBanner();
                     }
                 }
 
@@ -415,6 +430,13 @@ let currentPostId = null;
                 document.getElementById('current-post-title').innerText = data.title;
                 document.getElementById('current-post-content').innerText = data.content;
                 document.getElementById('current-post-date').innerText = data.created_at;
+                lastPostData = data;
+
+                if (data.session_status === 'CLOSED_BY_POLICE') {
+                    showClosedBanner();
+                } else {
+                    hideClosedBanner();
+                }
 
                 const container = document.getElementById('comments-container');
                 let newCommentAdded = false;
@@ -465,7 +487,8 @@ let currentPostId = null;
             }
         }
 
-        function showPoliceWarning() {
+        function showPoliceWarning(sessionId) {
+            policeWarningVisible = true;
             const el = document.getElementById('police-warning');
             el.classList.remove('hidden');
             setTimeout(() => {
@@ -474,13 +497,32 @@ let currentPostId = null;
             }, 50);
         }
 
+        function dismissPoliceWarning() {
+            // 현재 세션을 기억해 다시는 표시하지 않음
+            if (currentSessionId) {
+                dismissedPoliceSessions.add(currentSessionId);
+            }
+            hidePoliceWarning();
+        }
+
         function hidePoliceWarning() {
+            policeWarningVisible = false;
             const el = document.getElementById('police-warning');
             el.classList.remove('opacity-100');
             el.classList.add('opacity-0');
             setTimeout(() => {
                 el.classList.add('hidden');
-            }, 1000);
+            }, 500);
+        }
+
+        function showClosedBanner() {
+            const el = document.getElementById('closed-session-banner');
+            if (el) el.classList.remove('hidden');
+        }
+
+        function hideClosedBanner() {
+            const el = document.getElementById('closed-session-banner');
+            if (el) el.classList.add('hidden');
         }
 
         // --- Bot Inspector Logic (단일 봇) ---
@@ -929,6 +971,81 @@ let currentPostId = null;
             document.getElementById(`tab-${tab}`).classList.add('active');
             btn.classList.add('active');
             btn.classList.remove('text-gray-500', 'bg-gray-50');
+            // 탭 패널이 display:none 에서 표시되면 Chart.js가 크기를 0으로 계산하므로 resize 필요
+            requestAnimationFrame(() => {
+                if (compStanceChartInstance) compStanceChartInstance.resize();
+                if (compConvictionChartInstance) compConvictionChartInstance.resize();
+                if (compArousalChartInstance) compArousalChartInstance.resize();
+            });
+        }
+
+        // 게시글 전체 내용을 텍스트로 복사
+        function copyPost() {
+            if (!lastPostData) { alert('불러온 게시글이 없습니다.'); return; }
+            const d = lastPostData;
+            let txt = `[POST #${d.id}] ${d.title}\n${d.created_at}\n\n${d.content}\n\n${'='.repeat(50)}\n댓글 (${d.comments.length}개)\n${'='.repeat(50)}\n`;
+            d.comments.forEach((c, i) => {
+                txt += `\n[${i+1}] ${c.bot_name}${c.mentioned_bot ? ' → @'+c.mentioned_bot : ''} (${c.created_at})\n${c.content}\n`;
+            });
+            navigator.clipboard.writeText(txt).then(() => {
+                showCopyToast('클립보드에 복사되었습니다!');
+            }).catch(() => alert('복사에 실패했습니다.'));
+        }
+
+        // 게시글 전체 내용을 PDF로 저장
+        function savePdf() {
+            if (!lastPostData) { alert('불러온 게시글이 없습니다.'); return; }
+            const d = lastPostData;
+
+            // 임시 프린트 전용 div 생성
+            const printDiv = document.createElement('div');
+            printDiv.style.cssText = 'font-family:sans-serif;padding:32px;max-width:800px;margin:0 auto;color:#111;';
+
+            let html = `<h1 style="font-size:22px;font-weight:bold;margin-bottom:4px;">${escapeHtml(d.title)}</h1>`;
+            html += `<div style="color:#888;font-size:12px;margin-bottom:4px;">POST #${d.id} &nbsp;·&nbsp; ${d.created_at}</div>`;
+            html += `<hr style="margin:12px 0;"/>`;
+            html += `<p style="font-size:14px;line-height:1.7;white-space:pre-wrap;">${escapeHtml(d.content)}</p>`;
+            html += `<hr style="margin:20px 0;"/>`;
+            html += `<h2 style="font-size:16px;font-weight:bold;margin-bottom:12px;">댓글 ${d.comments.length}개</h2>`;
+
+            const botColors = { bot_1: '#9333ea', bot_2: '#ec4899', bot_3: '#22c55e', police: '#2563eb' };
+            d.comments.forEach((c, i) => {
+                const col = botColors[c.bot_name] || '#4f46e5';
+                html += `<div style="border-left:4px solid ${col};padding:8px 12px;margin-bottom:10px;background:#fafafa;border-radius:4px;">`;
+                html += `<div style="font-size:12px;font-weight:bold;color:${col};">${escapeHtml(c.bot_name)}`;
+                if (c.mentioned_bot) html += ` <span style="color:#6366f1;">→ @${escapeHtml(c.mentioned_bot)}</span>`;
+                html += ` &nbsp;<span style="color:#aaa;font-weight:normal;">${c.created_at}</span></div>`;
+                html += `<div style="font-size:13px;margin-top:4px;white-space:pre-wrap;">${escapeHtml(c.content)}</div>`;
+                html += `</div>`;
+            });
+
+            printDiv.innerHTML = html;
+
+            // window.print()용 숨김 iframe 트릭
+            const iframe = document.createElement('iframe');
+            iframe.style.cssText = 'position:fixed;right:-9999px;top:-9999px;width:900px;height:1200px;border:none;';
+            document.body.appendChild(iframe);
+            iframe.contentDocument.open();
+            iframe.contentDocument.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>AMEVA Post #${d.id}</title><style>body{font-family:sans-serif;margin:0;padding:0;}@media print{@page{margin:20mm;}}</style></head><body>${printDiv.outerHTML}</body></html>`);
+            iframe.contentDocument.close();
+            setTimeout(() => {
+                iframe.contentWindow.focus();
+                iframe.contentWindow.print();
+                setTimeout(() => document.body.removeChild(iframe), 2000);
+            }, 400);
+        }
+
+        function escapeHtml(s) {
+            if (typeof s !== 'string') return '';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function showCopyToast(msg) {
+            const t = document.createElement('div');
+            t.className = 'fixed bottom-6 right-6 bg-indigo-700 text-white px-5 py-3 rounded-xl shadow-lg text-sm font-bold z-[200] transition-all';
+            t.textContent = msg;
+            document.body.appendChild(t);
+            setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 2000);
         }
 
         async function loadComparisonData() {
@@ -1017,52 +1134,59 @@ let currentPostId = null;
 
             const commonOpts = (yMin, yMax) => ({
                 responsive: true,
+                maintainAspectRatio: false,
                 scales: { y: { min: yMin, max: yMax } },
                 plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 10, font: { size: 10 } } } },
                 animation: { duration: 0 }
             });
 
-            // Stance Chart
-            if (!compStanceChartInstance) {
-                const ctx = document.getElementById('compStanceChart').getContext('2d');
-                compStanceChartInstance = new Chart(ctx, {
+            // 차트가 hidden 탭에 있으면 canvas 크기가 0이 돼서 오류가 남
+            // 해결: 기존 인스턴스 파괴 후 재생성, 탭 전환 시 resize() 호출
+            if (compStanceChartInstance) { compStanceChartInstance.destroy(); compStanceChartInstance = null; }
+            if (compConvictionChartInstance) { compConvictionChartInstance.destroy(); compConvictionChartInstance = null; }
+            if (compArousalChartInstance) { compArousalChartInstance.destroy(); compArousalChartInstance = null; }
+
+            // 모든 탭 패널을 잠깐 visible로 만들고 차트 생성 후 원래대로 복원
+            const stancePanel = document.getElementById('tab-stance');
+            const convPanel = document.getElementById('tab-conviction');
+            const arousalPanel = document.getElementById('tab-arousal');
+            const panels = [stancePanel, convPanel, arousalPanel];
+
+            // 잠깐 모두 표시 (차트 초기화에 canvas 크기가 필요)
+            panels.forEach(p => { p.style.display = 'block'; p.style.visibility = 'hidden'; });
+
+            requestAnimationFrame(() => {
+                const stanceCtx = document.getElementById('compStanceChart').getContext('2d');
+                compStanceChartInstance = new Chart(stanceCtx, {
                     type: 'line',
                     data: { labels, datasets: bots.map(b => buildDataset(b, 'x')) },
                     options: commonOpts(-1, 1)
                 });
-            } else {
-                compStanceChartInstance.data.labels = labels;
-                compStanceChartInstance.data.datasets = bots.map(b => buildDataset(b, 'x'));
-                compStanceChartInstance.update('none');
-            }
 
-            // Conviction Chart
-            if (!compConvictionChartInstance) {
-                const ctx = document.getElementById('compConvictionChart').getContext('2d');
-                compConvictionChartInstance = new Chart(ctx, {
+                const convCtx = document.getElementById('compConvictionChart').getContext('2d');
+                compConvictionChartInstance = new Chart(convCtx, {
                     type: 'line',
                     data: { labels, datasets: bots.map(b => buildDataset(b, 'y')) },
                     options: commonOpts(0, 1)
                 });
-            } else {
-                compConvictionChartInstance.data.labels = labels;
-                compConvictionChartInstance.data.datasets = bots.map(b => buildDataset(b, 'y'));
-                compConvictionChartInstance.update('none');
-            }
 
-            // Arousal Chart
-            if (!compArousalChartInstance) {
-                const ctx = document.getElementById('compArousalChart').getContext('2d');
-                compArousalChartInstance = new Chart(ctx, {
+                const arousalCtx = document.getElementById('compArousalChart').getContext('2d');
+                compArousalChartInstance = new Chart(arousalCtx, {
                     type: 'line',
                     data: { labels, datasets: bots.map(b => buildDataset(b, 'arousal')) },
                     options: commonOpts(-1, 1)
                 });
-            } else {
-                compArousalChartInstance.data.labels = labels;
-                compArousalChartInstance.data.datasets = bots.map(b => buildDataset(b, 'arousal'));
-                compArousalChartInstance.update('none');
-            }
+
+                // 원래 CSS로 복원 (active 클래스를 따름)
+                panels.forEach(p => { p.style.display = ''; p.style.visibility = ''; });
+
+                // 현재 visible 탭 차트 강제 리사이즈
+                requestAnimationFrame(() => {
+                    if (compStanceChartInstance) compStanceChartInstance.resize();
+                    if (compConvictionChartInstance) compConvictionChartInstance.resize();
+                    if (compArousalChartInstance) compArousalChartInstance.resize();
+                });
+            });
         }
 
         function onSliderChange(sliderIdx) {
