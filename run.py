@@ -524,9 +524,13 @@ def start_native_server(server_path: str, model_name: str, hardware_mode: str):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+            
         native_server_process = subprocess.Popen(
             cmd,
-            startupinfo=startupinfo
+            startupinfo=startupinfo,
+            env=env
         )
         logger.info(f"[NATIVE] Server process started with PID {native_server_process.pid}")
     except FileNotFoundError:
