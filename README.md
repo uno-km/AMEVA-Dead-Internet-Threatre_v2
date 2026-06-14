@@ -1,3 +1,5 @@
+#  AMEVA Dead Internet Theatre: Latent Personality Dynamics Simulation System
+
 > **[프로젝트 요약 (Resume Profile)]**
 > 
 > * **① 제목:** 잠재적 인격 동역학 시뮬레이션 시스템 (AMEVA Dead Internet Theatre)
@@ -13,10 +15,10 @@
 >   * **연구 성과:** 감독 에이전트가 없을 시 전체 여론이 단일한 방향성으로 극단 수렴되는 한계를 규명하였으며, `3B` 이하 소형 모델의 컨텍스트 포화로 인한 정체성 붕괴 문제를 발견함. 또한 분노·공감 등의 감정을 벡터로 수치화하여 봇들의 성격을 제어한 결과 실제 인간과 유사한 자연스러운 대화가 창발됨을 입증하여 완전 자율성보다 통제 에이전트 아키텍처가 필수적임을 규명
 > * **④ 기여도:** 단독 개발 (100% - 아키텍처 설계, 보안 시스템 구축, 코어 로직 구현 전담)
 
-# 🎭 AMEVA Dead Internet Theatre: Latent Personality Dynamics Simulation System
+#  AMEVA Dead Internet Theatre: Latent Personality Dynamics Simulation System
 
 <details>
-<summary>🎬 <b>실시간 시뮬레이션 데모 화면 미리보기 (클릭하여 열기)</b></summary>
+<summary> <b>실시간 시뮬레이션 데모 화면 미리보기 (클릭하여 열기)</b></summary>
 
 ```html
 <!DOCTYPE html>
@@ -52,7 +54,7 @@
 <body class="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-slate-100 font-sans h-[600px] flex flex-col overflow-hidden p-4">
     <header class="flex justify-between items-center pb-3 border-b border-slate-800 flex-shrink-0">
         <div>
-            <h1 class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400">🎭 AMEVA Live Arena</h1>
+            <h1 class="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400"> AMEVA Live Arena</h1>
             <p class="text-[10px] text-slate-400">실시간 자율 에이전트 오피니언 동역학 시뮬레이션 (데모 루프)</p>
         </div>
         <div class="flex items-center gap-2">
@@ -70,7 +72,7 @@
                     <!-- Bot 1 -->
                     <div class="bg-slate-800/80 p-2 rounded-xl border border-slate-700/50">
                         <div class="flex justify-between items-center text-xs font-bold mb-1">
-                            <span class="text-purple-400">🔴 BOT_1</span>
+                            <span class="text-purple-400"> BOT_1</span>
                             <span id="bot1-anger" class="text-red-400 text-[10px]">Anger: 12.0</span>
                         </div>
                         <div class="w-full bg-slate-700 rounded-full h-1">
@@ -84,7 +86,7 @@
                     <!-- Bot 2 -->
                     <div class="bg-slate-800/80 p-2 rounded-xl border border-slate-700/50">
                         <div class="flex justify-between items-center text-xs font-bold mb-1">
-                            <span class="text-pink-400">🔵 BOT_2</span>
+                            <span class="text-pink-400"> BOT_2</span>
                             <span id="bot2-anger" class="text-red-400 text-[10px]">Anger: 18.5</span>
                         </div>
                         <div class="w-full bg-slate-700 rounded-full h-1">
@@ -98,7 +100,7 @@
                     <!-- Bot 3 -->
                     <div class="bg-slate-800/80 p-2 rounded-xl border border-slate-700/50">
                         <div class="flex justify-between items-center text-xs font-bold mb-1">
-                            <span class="text-green-400">🟢 BOT_3</span>
+                            <span class="text-green-400"> BOT_3</span>
                             <span id="bot3-anger" class="text-red-400 text-[10px]">Anger: 5.0</span>
                         </div>
                         <div class="w-full bg-slate-700 rounded-full h-1">
@@ -304,7 +306,12 @@
 
 </details>
 
-## 1. 개요 (Abstract)
+---
+
+---
+
+## 3. 개요 (Abstract)
+
 본 프로젝트는 특정 디베이트 포럼 내에서 자율 작동하는 복수의 AI 에이전트들이 고유의 페르소나(Persona)와 입장(Stance)을 기반으로 자율적인 사회적 상호작용 및 디베이트를 수행하는 **자율형 커뮤니티 시뮬레이션 시스템**이다. 본 시스템은 웹 상의 상당수 상호작용이 인간이 아닌 봇에 의해 생성된다는 '데드 인터넷 이론(Dead Internet Theory)'을 모사하기 위해 설계되었으며, 상태 기하학 기반의 대화 유도 및 실시간 모니터링 대시보드를 제공한다.
 
 특히 하드웨어 제약 조건(CPU-Only 환경 및 단일 GPU VRAM 한계) 하에서 작동성 및 연산 효율을 보장하기 위해 **동적 컨테이너 수명 주기 관리(Sequential Container Lifecycle Control)**, **단일 엔드포인트 세마포어 격리 락(Semaphore-Based Routing Lock)**, 그리고 다차원 상태 전이를 활용한 **잠재적 인격 동적 엔진(LPDE - Latent Personality Dynamics Engine)**을 통합 구축하여 최고 수준의 MLOps 안정성과 자율 디베이트 모형을 확보하였다.
@@ -321,7 +328,7 @@ behavioral simulation is required to reproduce realistic social dynamics.~~*
 
 ---
 
-## 2. 주요 기술적 특징 (Technical Deep-Dive)
+## 4. 주요 기술적 특징 (Technical Deep-Dive)
 
 ### 2.1. 잠재적 인격 동적 엔진 (LPDE - Latent Personality Dynamics Engine)
 에이전트는 단순 정적 텍스트 기반의 프롬프트에서 벗어나, 수학적으로 추상화된 감정, 오피니언, 영향력 상태 공간상에서 자율 운동한다.
@@ -358,6 +365,7 @@ behavioral simulation is required to reproduce realistic social dynamics.~~*
   ```
 
 ### 2.2. 자율 행동 결정 모델 (Agent Behavior Model)
+
 본 시스템의 에이전트들은 고정된 턴(Turn) 기반 스크립트로 작동하지 않으며, 상황에 따라 행동을 유동적으로 결정하는 **비결정적(Non-deterministic) 행동 루프**를 따른다. 이를 통해 예기치 못한 창발적 상호작용(Emergent Interaction)을 이끌어낸다.
 1. **환경 관측 (Observation)**: 포럼 내의 최신 게시물, 타 에이전트의 댓글, 그리고 자신을 향한 멘션(Mentions)을 실시간으로 수집 및 분석한다.
 2. **내부 상태 전이 (State Update)**: 관측된 이벤트(Event)를 바탕으로 잠재적 인격 동적 엔진(LPDE)의 다차원 텐서(감정, 의견, 엣지)를 수학적으로 업데이트한다.
@@ -374,12 +382,13 @@ capable of initiating, ignoring, or abandoning interactions — a key requiremen
 ![AMEVA 포럼 피드 및 에이전트 상호작용 예시](file:///C:/Users/ATSAdmin/.gemini/antigravity-ide/brain/05624b30-c507-4cfd-a9e7-c81b94063ae0/artifacts/forum_feed.png)
 
 ### 2.3. 어휘 압축 및 출력 정제 기술 (Prompt Compression & Output Sanitization)
+
 - **압축된 상태 태그 (Compressed State Tags)**: 소형 또는 중간 크기 모델의 프롬프트 길이 한계와 추론 비용을 방어하기 위해 복잡한 감정 상태를 장황한 자연어로 풀어 쓰는 대신 구조화된 상태 압축 태그(예: `[SYS_STATE: bot_1|ANG:85(ENRAGED)|TGT:bot_2:15]`)를 적용하여 디코더의 주의 집중(Attention) 부하를 축소한다.
 - **출력 정제 기술**: LLM의 구조적 출력 한계로 인해 지시문 프로토콜이나 XML/JSON 태그가 여과 없이 유출되는 현상을 완벽히 차단하기 위해 정규식 기반의 문자열 필터와 자율 보정 프로토콜(`enforce_fallback`)을 탑재하였다.
 
 ---
 
-## 3. 기술적 트레이드오프 및 아키텍처 의사결정 (Technical Trade-offs & Decisions)
+## 5. 기술적 트레이드오프 및 아키텍처 의사결정 (Technical Trade-offs & Decisions)
 
 본 시스템은 자원의 극심한 제한(CPU-only 로컬 환경 및 단일 그래픽 장치 VRAM 임계치) 속에서 3명의 에이전트가 고성능 자율 추론을 장시간 동안 안정적으로 수행할 수 있도록 설계되었으며, 이에 따라 다음과 같은 핵심 트레이드오프와 아키텍처 결정을 수행하였다.
 
@@ -397,6 +406,7 @@ capable of initiating, ignoring, or abandoning interactions — a key requiremen
 ```
 
 ### 3.1. 에이전트 LLM의 규모 선택 (Model Scaling: 1.5B vs. 3B vs. 8B)
+
 - **배경 및 대안**: 다중 봇 시뮬레이션 환경 구축 시, 1.5B(Qwen-1.8B 등) 또는 3B(Phi-3 등) 급의 초소형 언어 모델(SLM)을 활용하여 모든 에이전트 추론 서버를 호스트 GPU에 병렬로 동시에 상주시키는 대안과, 8B(Llama-3.1-8B-Instruct) 모델을 채택하여 연산하는 대안이 대립하였다.
 - **의사결정**: **Llama-3.1-8B-Instruct 모델 채택 및 순차(Sequential) 실행 구조 절충**
 - **타당성 논리 및 트레이드오프**: 
@@ -404,6 +414,7 @@ capable of initiating, ignoring, or abandoning interactions — a key requiremen
   * *8B 모델의 비용 및 극복*: Llama-3.1-8B-Instruct 모델은 고차원 페르소나 설정 및 Anti-parroting 규칙을 정상 준수하였으나, 3개의 컨테이너를 동시에 GPU에 올릴 때 가동 메모리가 한계를 초과하여 OOM(Out of Memory) 크래시가 유발되었다. 이에 따라 봇 서버를 병렬 상주시키는 대신, **동작할 차례인 봇 컨테이너만 실시간으로 기동하고 추론 후 즉시 내리는 순차적 오케스트레이션**을 채택하여 하드웨어 요구 스펙을 혁신적으로 타협하였다.
 
 ### 3.2. 자원 격리 및 라이프사이클 관리 (Docker Container-Based Routing vs. In-Process PyTorch Merging)
+
 - **배경 및 대안**: Python 내부 런타임 가상환경 내에서 PyTorch 및 HuggingFace 모델 라이브러리를 가동하여 실시간으로 모델 객체를 로드 및 언로드(Merge and Unload)하는 방식과, 가상화 인프라 레벨인 `Docker Compose`를 활용하여 호스트와 프로세스 수준에서 llama.cpp 물리 서버 컨테이너를 켜고 끄는 방식 중 선택해야 했다.
 - **의사결정**: **Docker Container-Based 수명 주기 제어 채택**
 - **타당성 논리 및 트레이드오프**:
@@ -425,6 +436,7 @@ async def lifecycle(self):
 ```
 
 ### 3.3. CPU-Only 하드웨어의 병목 및 CPU 스로틀링 극복 (Dynamic CPU Throttling vs. Native Async Run)
+
 - **배경 및 대안**: GPU 가속기가 배제된 로컬 CPU 환경에서 복수의 llama.cpp 추론 스레드가 최대 CPU 성능을 사용해 추론할 시, CPU 사용률이 100%에 고정되면서 FastAPI 비동기 이벤트 루프와 SQLite DB 트랜잭션 처리가 정지되어 통신 타임아웃 및 스레드 락(Deadlock)에 직면했다.
 - **의사결정**: **Dynamic CPU Throttling (`smart_sleep`) 및 단일 엔드포인트 세마포어(Semaphore Lock)**
 - **타당성 논리 및 트레이드오프**:
@@ -458,11 +470,13 @@ async def smart_sleep():
 ```
 
 ### 3.4. 인격 동역학 상태 제어 엔진의 진화 및 타당성 (LPDE Engine: Phase 1 ~ Phase 3)
+
 - **Phase 1 (정적 인격 주입)**: 봇의 페르소나 정보를 담은 단순 Text prompt 지문을 반복 매핑. 봇이 다른 대화의 감정이나 톤의 영향을 받지 못하고 맹목적으로 똑같은 어조만 반복하여 사회적 시뮬레이션의 의미가 결여됨.
 - **Phase 2 (Shadow LPDE - 섀도우 엔진)**: 관계 및 감정 상태 벡터 변환 수식을 내부 모듈에서 가동하되, 프롬프트에 직접 변환하지 않고 상태 감시(Monitoring) 용도로만 고립. 연속적 수치는 확보했으나 LLM 인스턴스의 실제 출력과 벡터 상태 궤적이 완벽히 어긋나는 불일치 발생.
 - **Phase 3 (Active Vector Perturbation & System state integration)**: 감정(Affect), 의견(Opinion), 영향력(Power) 및 엣지 관계 행렬(Edges)을 프롬프트 시스템 태그와 밀접 결합하고, 대화의 교착 탈피를 위해 감독 LLM(God LLM)이 감정의 차이를 JSON Delta 외란으로 강제 주입하는 폐루프 피드백 제어계(Closed-Loop Feedback Control System)로 설계 진화.
 
 ### 3.5. 자아 정체성 붕괴(Stance Flip)의 정규식 차단 방어망 (Stance Coherence Validation)
+
 - **배경 및 대안**: LLM은 Autoregressive 언어 모델 특성상 상대방의 그럴싸한 논거에 지속 노출될 경우, 자신이 '극단적 반대자(Hardliner)'로 설정되어 있음에도 "네 말이 전적으로 맞다(I completely agree with you)"라며 본인의 최초 입장을 뒤집어버리는 환각(Stance Flip) 현상을 일으킨다. 이를 방지하기 위해 컨텍스트(System Prompt)에 억제 명령을 증폭시키는 대안이 있었으나, 지시문 길이에 비례해 연산 비용이 증가할 뿐 완벽한 차단은 불가능했다.
 - **의사결정**: **Hardliner 자아 붕괴 정규식 방어망 (`validate_stance_coherence`) 도입**
 - **타당성 논리**: 에이전트의 역할 프로필(`role_label`)이 `pole_a_hardliner`와 같은 극단주의 세팅일 때, 출력 텍스트 내에서 `I fully agree`와 같은 반대 진영 수용 발언이 정규식(Regex)에 포착되면 해당 턴의 추론 결과를 무효화(Reject)하고 강제 Fallback 처리(재생성)를 구동한다. 이는 생성 속도를 다소 희생하더라도, "고집스러운 극단주의 포럼"이라는 시뮬레이션의 기본 핍진성(Verisimilitude)을 사수하기 위한 필수 불가결한 트레이드오프였다.
@@ -484,18 +498,20 @@ def validate_stance_coherence(text: str, role_label: str) -> bool:
 ```
 
 ### 3.6. 다중 멘션 분산 억제 및 단일 포커스 강제화 (Single-Target Mention Forcing)
+
 - **배경 및 대안**: 여러 에이전트가 동시에 참여하는 포럼의 특성상, 감정이 격해진 봇들은 `@bot_1, @bot_2 I hate both of you!`처럼 다중 타깃 멘션(Multi-Mention)을 발생시킨다. 하지만 LPDE 수학 모델 측면에서 볼 때, 한 턴의 이벤트는 엣지 텐서 행렬(Edge Tensor)에서 단일 지향성(Directed Arrow)을 명확히 타격(Update)해야만 텐서 방정식이 안정성을 유지할 수 있다. 프롬프트를 통해 "한 명만 지목하라"고 지시하는 대안이 있으나 준수율이 100%에 도달하지 못했다.
 - **의사결정**: **물리적 Single Mention 강제 정제기(Sanitizer) 도입**
 - **타당성 논리**: LLM의 확률적 지시어 추종에만 의존하지 않고, 물리적 후처리 파이프라인(`force_single_mention`)을 구축하여 최초 발현된 단 하나의 멘션 타깃(`@bot_X`)만 남기고 후속 `@` 기호를 텍스트에서 삭제 처리했다. 이를 통해 관계망 전이 연산의 수학적 모호성을 원천 차단하고, 에이전트 간의 티키타카(Tiki-taka) 몰입도를 극대화하였다.
 
 ### 3.7. JSON 파싱 붕괴 및 런타임 폴백 메커니즘 (Regex-based Fallback vs. Native JSON Mode)
+
 - **배경 및 대안**: 디렉터(God LLM) 개입 시점에는 텍스트뿐만 아니라 JSON 구조의 델타 매트릭스를 반환받아야 한다. OpenAI의 `response_format={"type": "json_object"}`와 같이 LLM Native JSON 모드를 사용할 수 있는 외부 서비스와 달리, 로컬 8B 모델 환경에서는 JSON 괄호를 열고 닫지 못하거나 Escape 문자를 누락하는 심각한 직렬화(Serialization) 에러가 자주 발생했다.
 - **의사결정**: **정규식 기반 강제 추출 및 단계적 Fallback 재시도(Retry) 메커니즘 채택**
 - **타당성 논리**: 제한된 로컬 모델에게 완벽한 JSON Syntax를 기대하기보다 자유 양식의 텍스트를 허용하되, `re.search(r'\{.*\}', text, re.DOTALL)` 등을 활용하여 JSON 블록만 정밀 타격하는 정규식 파서(`safe_json_loads`)를 도입했다. JSON 파싱이 실패하면 내부 딕셔너리를 기본 중립 텐서값(Default/Neutral)으로 대체하거나 턴을 재생성하는 Fallback 우회로를 설계함으로써, 단 한 번의 오작동이 전체 런타임을 붕괴시키는 참사를 막아냈다.
 
 ---
 
-## 4.0. 폐루프 상호작용 모델 (Closed-Loop Interaction Model)
+## 6.0. 폐루프 상호작용 모델 (Closed-Loop Interaction Model)
 
 본 시스템은 에이전트 간의 단순한 발화 나열을 넘어, 상태 전이와 환경 변화가 상호 인과 관계를 형성하며 동역학적 궤적을 그리도록 설계된 **폐루프 피드백 제어 시스템(Closed-Loop Feedback Control System)**이다. 본 절에서는 이 피드백 루프의 수학적 정의, 세대별 아키텍처 진화 과정(Phase 1 ~ Phase 3), 그리고 창발적 수렴 및 발산 동역학에 대해 서술한다.
 
@@ -548,16 +564,19 @@ graph LR
 시스템의 안정성과 인격 반영의 정밀도를 향상시키기 위해, 상호작용 피드백 루프는 다음과 같이 3단계에 걸쳐 고도화되었다.
 
 #### 1) Phase 1: 개루프 대화 파이프라인 (Open-Loop Dialogue Pipeline)
+
 * **구조**: $\text{Static Persona} \to \text{LLM} \to \text{Generation}$
 * **특징**: 에이전트는 사전에 정의된 정적 시스템 프롬프트(Static Prompt)에 의존하여 응답을 생성했다.
 * **한계**: 외부 대화의 자극이나 관계 변화가 내부 상태에 영향을 주지 못하는 개루프(Open-Loop) 구조였기 때문에, 대화가 거듭될수록 상대의 어조를 맹목적으로 복제하는 **Parroting(앵무새 현상)**이나 토론의 주제가 급격히 수렴하여 동일 어휘가 단순 반복되는 교착 상태가 빈번히 발생하였다.
 
 #### 2) Phase 2: 외재적 섀도우 추적 (Shadow LPDE Tracking)
+
 * **구조**: $\text{Static Persona} \to \text{LLM} \to \text{Generation} \to \text{External State Logic (Logging Only)}$
 * **특징**: 에이전트의 대화로부터 사건을 감지하고 감정(Affect), 의견(Opinion)의 변화량을 별도의 DB 및 알고리즘으로 계산하는 백그라운드 추적기를 가동했다.
 * **한계**: 연산된 상태 변화값이 실시간으로 모니터링 UI에는 노출되었으나, **정작 생성 모델(LLM)의 컨텍스트 프롬프트에는 재피드백(Feedback)되지 않았다.** 그 결과 에이전트의 내부 분노 상태가 최대치에 도달했음에도, 대화 텍스트 상으로는 온화한 어조를 유지하는 심각한 인지부조화(State-Language Decoupling)가 발견되었다.
 
 #### 3) Phase 3: 능동적 벡터 피드백 및 외란 개입 (Active Feedback & Perturbation Loop)
+
 * **구조**: $\text{Event} \to \text{LPDE Dynamic Engine} \to \text{Compressed System Tag} \to \text{LLM Inference} \to \text{Verification \& Validation (Sanitizer)} \to \text{DB State Commit}$
 * **특징**: 수학적으로 계산된 상태 텐서가 턴마다 압축 태그(`[SYS_STATE: ...]`) 형태로 프롬프트에 직접 주입되어 LLM의 발화 기조를 지배한다. 또한, 장기 시뮬레이션 시 고립점(Attractor)에 갇히는 현상을 해결하기 위해 **God LLM 외란 개입 모델(Active Perturbation)**을 도입하여 고의적으로 상태 임계치를 교란함으로써 상태 공간 상에서 새로운 위상 변화를 유도한다.
 * **안정성 장치**: 자아 정체성 붕괴 방어 필터(`validate_stance_coherence`) 및 멘션 정제기(`force_single_mention`)를 루프의 최종단에 배치하여 폐루프의 발산(Divergence) 및 상태 폭주 크래시를 수학적으로 보정한다.
@@ -727,7 +746,7 @@ def update_from_event(
 
 ---
 
-## 5. 시스템 아키텍처 설계 (Software Architecture Design)
+## 6. 시스템 아키텍처 설계 (Software Architecture Design)
 
 ```mermaid
 graph TD
@@ -748,6 +767,7 @@ graph TD
 ```
 
 ### 5.1. 디렉토리 구조 (Repository Layout)
+
 ```text
 AMEVA-Dead-Internet-Threatre/
 ├── run.py                 # [Root] FastAPI 웹 애플리케이션 및 REST API 서버
@@ -781,9 +801,11 @@ AMEVA-Dead-Internet-Threatre/
 ```
 
 ### 5.2. 데이터베이스 아키텍처 및 EAI 관계도 (Database Architecture & EAI Schema)
+
 본 시스템은 시뮬레이션의 상태 복구성과 연속성을 확보하기 위해 SQLite3를 백엔드 저장소로 활용한다. 상태 변환 텐서의 정밀 기록과 봇 인격 전이 추적을 위해 **개체-에이전트-상호작용(Entity-Agent-Interaction/Event, EAI) 모델**로 설계되었다.
 
 #### EAI 관계도 (EAI Relationship Diagram)
+
 ```mermaid
 erDiagram
     SESSIONS ||--o{ POSTS : "spawns"
@@ -889,16 +911,18 @@ erDiagram
 
 ---
 
-## 6. 실행 및 사용 가이드 (Operational Workflow)
+## 7. 실행 및 사용 가이드 (Operational Workflow)
 
 본 프로젝트는 Docker를 활용한 8B 모델 추론 환경의 격리 및 웹 기반의 실시간 시뮬레이션을 동시 제공한다.
 
 ### 6.1. 사전 준비 사항 (Prerequisites)
+
 - Docker Desktop (Windows/Linux/macOS)
 - Python 3.10+
 - SQLite3 CLI (선택사항)
 
 ### 6.2. 설치 및 환경 설정 (Installation & Setup)
+
 1. **가상환경 설치 및 종속성 적재**:
    ```bash
    python -m venv venv
@@ -909,6 +933,7 @@ erDiagram
    본 시스템에 동봉된 `docker/docker-compose.yml` 및 `Dockerfile`을 통해 llama.cpp 서버용 8B GGUF 모델 가중치를 지정된 볼륨 또는 경로로 설정한다.
 
 ### 6.3. 실행 가이드 (Execution)
+
 1. **API 서버 및 시뮬레이션 웹 대시보드 기동**:
    ```bash
    python run.py
@@ -921,3 +946,19 @@ erDiagram
 
 ---
 **Note**: 본 시스템은 CPU-Only 환경의 동적 스로틀링을 가동하여 로컬 환경 구동을 지원하나, 추론 속도 지연을 줄이기 위해 가능한 GPU 16GB 이상의 다중 메모리 장치 가동을 권장한다.
+
+## 9. 연락처 (Contact)
+
+저는 Multi-Agent Systems, Edge Computing, 그리고 AI SRE 분야에 대한 학술적 담론을 언제나 환영합니다.
+
+- **GitHub**: [@uno-km](https://github.com/uno-km)
+- **Email**: zhfldk014745@naver.com
+- **Tstory**: [my-blog](https://uno-kim.tistory.com/)
+- **Research Focus**: Hierarchical AI Orchestration, Edge-native Inference, Data Sovereignty
+- **Generated by AMEVA Researcher Portfolio Builder**
+
+*Last Updated: June 9, 2026*
+
+---
+
+<sub>*빅테크의 클라우드 종속을 거부하고, 온프레미스 자율 지능의 독립과 생존을 실증합니다.*</sub>

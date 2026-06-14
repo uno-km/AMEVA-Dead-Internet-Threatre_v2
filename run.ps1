@@ -1,13 +1,29 @@
 # AMEVA Dead Internet Theatre 실행 및 환경 진단 스크립트
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
-If ($ScriptPath) { Set-Location -Path $ScriptPath }
+if ($ScriptPath) { Set-Location -Path $ScriptPath }
 
-# [1] 파이썬 가상환경(venv) 검증 및 패키지 실행 단계
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($PSVersionTable.PSVersion.Major -le 5) { chcp 65001 | Out-Null }
+$ErrorActionPreference = "Stop"
+
+Write-Host "--- AMEVA Dead Internet Theatre Environment Setup ---" -ForegroundColor Cyan
+Write-Host "Path: $(Get-Location)" -ForegroundColor Gray
+
+# [1] 파이썬 가상환경(venv) 검증 및 패키지 설치 단계
 $EnvDir = ".\venv"
 if (-not (Test-Path -Path $EnvDir)) {
-    Write-Host "Virtual environment not found. Running setup via setup.bat..." -ForegroundColor Yellow
-    cmd.exe /c setup.bat
+    Write-Host "Virtual environment (venv) not found. Creating virtual environment..." -ForegroundColor Yellow
+    python -m venv $EnvDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to create virtual environment."
+        exit 1
+    }
+    
+    Write-Host "Upgrading pip and installing requirements..." -ForegroundColor Yellow
+    & "$EnvDir\Scripts\python.exe" -m pip install --upgrade pip setuptools wheel
+    & "$EnvDir\Scripts\python.exe" -m pip install -r requirements.txt
 }
 
 # [2] 하드웨어와 설치된 LLM 엔진 정합성 검증
@@ -25,7 +41,7 @@ if ($hasNvidia) {
         # 환경변수가 아직 갱신되지 않았을 경우 머신 레벨에서 가져오기 시도
         $machineCuda = [Environment]::GetEnvironmentVariable('CUDA_PATH', 'Machine')
         if ($machineCuda) {
-            Write-Host "Discovered CUDA_PATH from registry. Applying to current session without restart." -ForegroundColor Green
+            Write-Host "Discovered CUDA_PATH from registry. Applying to current session." -ForegroundColor Green
             [Environment]::SetEnvironmentVariable('CUDA_PATH', $machineCuda, 'Process')
             $env:PATH += ";$machineCuda\bin"
             $cudaPath = $machineCuda
@@ -64,4 +80,7 @@ Write-Host "Activating virtual environment..." -ForegroundColor Cyan
 
 # [4] 메인 어플리케이션 진입 및 기동
 Write-Host "Launching AMEVA Dead Internet Theatre..." -ForegroundColor Cyan
+$env:PYTHONUNBUFFERED = "1"
+$env:PYTHONIOENCODING = "utf-8"
+
 & "$EnvDir\Scripts\python.exe" run.py

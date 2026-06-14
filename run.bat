@@ -1,10 +1,8 @@
 @echo off
-:: AMEVA Dead Internet Theatre - One-click run script
-:: Bypasses PowerShell execution policy to run run.ps1
-
-echo [AMEVA] Dead Internet Theatre system running...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1"
-
-echo.
-echo System terminated. Press any key to close.
-pause
+chcp 65001 > nul
+powershell -ExecutionPolicy Bypass -File "%~dp0run.ps1"
+if %errorlevel% neq 0 (
+    echo.
+    echo System encountered an error. Press any key to close.
+    pause
+)
