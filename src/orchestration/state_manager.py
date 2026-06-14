@@ -34,6 +34,13 @@ class OrchestratorState:
 
         # Error notification queue / fields
         self.last_error_message = None
+        self.current_activity = "대기 중..."
+        self.inference_mode = "sequential"
+        
+        # Local native server parameters
+        self.llama_server_path = "llama-server"
+        self.model_main = ""
+        self.hardware_mode = "cpu"
 
     def push_event(self, event_type: str, data: dict):
         if event_type == "ERROR":

@@ -80,8 +80,10 @@ let currentPostId = null;
                 let globalState = systemStatusMap["state"] || "UNKNOWN";
                 let lastError = systemStatusMap["last_error"];
                 
-                if (globalState === "IDLE" && !setupModalOpen) {
-                    openSetupModal();
+                // Update system activity text in real-time
+                let activityText = document.getElementById('system-activity-text');
+                if (activityText && systemStatusMap.current_activity) {
+                    activityText.textContent = systemStatusMap.current_activity;
                 }
                 
                 let globalBadge = document.getElementById('global-state-badge');
@@ -176,12 +178,40 @@ let currentPostId = null;
         }
 
         // --- Modal & Setup Logic ---
+        let setupModeListenersBound = false;
+        function updateSetupFormLayout() {
+            const modeInput = document.querySelector('input[name="inference_mode"]:checked');
+            const mode = modeInput ? modeInput.value : 'local_single_model';
+            const pathContainer = document.getElementById('llama-path-container');
+            const otherModelsContainer = document.getElementById('setup-other-models-container');
+            
+            if (mode === 'local_native') {
+                if (pathContainer) pathContainer.classList.remove('hidden');
+                if (otherModelsContainer) otherModelsContainer.classList.add('hidden');
+            } else if (mode === 'local_single_model') {
+                if (pathContainer) pathContainer.classList.add('hidden');
+                if (otherModelsContainer) otherModelsContainer.classList.add('hidden');
+            } else if (mode === 'parallel') {
+                if (pathContainer) pathContainer.classList.add('hidden');
+                if (otherModelsContainer) otherModelsContainer.classList.remove('hidden');
+            }
+        }
+
         async function openSetupModal() {
             if (setupModalOpen) return;
             setupModalOpen = true;
             
             const modal = document.getElementById('setup-modal');
             modal.classList.remove('hidden');
+            
+            updateSetupFormLayout();
+            
+            if (!setupModeListenersBound) {
+                document.querySelectorAll('input[name="inference_mode"]').forEach(radio => {
+                    radio.addEventListener('change', updateSetupFormLayout);
+                });
+                setupModeListenersBound = true;
+            }
             
             try {
                 const res = await fetch('/api/system/setup-info');
@@ -190,36 +220,46 @@ let currentPostId = null;
                 // Hardware Status
                 const hwStatus = document.getElementById('setup-hw-status');
                 const hwDesc = document.getElementById('setup-hw-desc');
-                const radioCuda = document.getElementById('radio-cuda');
-                const labelCuda = document.getElementById('label-cuda');
+                const radioGpu = document.getElementById('radio-gpu');
+                const labelGpu = document.getElementById('label-gpu');
+                const gpuDesc = document.getElementById('gpu-desc');
                 
                 hwStatus.textContent = data.hardware.details;
-                if (data.hardware.cuda_available) {
+                if (data.hardware.gpu_found) {
                     hwStatus.className = "px-4 py-2 rounded-xl font-bold bg-green-100 text-green-700 border border-green-200";
-                    hwDesc.textContent = "NVIDIA GPU 및 CUDA 가속 사용 가능";
-                    radioCuda.disabled = false;
-                    labelCuda.classList.remove('opacity-50');
-                    labelCuda.title = "";
-                    // Auto-select CUDA if available
-                    radioCuda.checked = true;
-                } else if (data.hardware.gpu_found) {
-                    hwStatus.className = "px-4 py-2 rounded-xl font-bold bg-yellow-100 text-yellow-700 border border-yellow-200";
-                    hwDesc.textContent = "GPU는 감지되었으나 CUDA 연동을 확인할 수 없습니다. (Fallback CPU)";
+                    hwDesc.textContent = "NVIDIA GPU 가속 사용 가능";
+                    radioGpu.disabled = false;
+                    labelGpu.classList.remove('opacity-50');
+                    labelGpu.title = "";
+                    radioGpu.checked = true;
+                    
+                    if (data.hardware.recommended_gpu_backend === "vulkan") {
+                        gpuDesc.textContent = "GTX 계열 감지 (Vulkan 자동 활성화)";
+                    } else {
+                        gpuDesc.textContent = "RTX 계열 감지 (CUDA 자동 활성화)";
+                    }
                 } else {
                     hwStatus.className = "px-4 py-2 rounded-xl font-bold bg-gray-100 text-gray-700 border border-gray-200";
                     hwDesc.textContent = "GPU가 감지되지 않았습니다. 기본 CPU 모드로 구동됩니다.";
+                    radioGpu.disabled = true;
+                    labelGpu.classList.add('opacity-50');
+                    labelGpu.title = "NVIDIA GPU가 필요합니다.";
+                    document.getElementById('radio-cpu').checked = true;
+                    gpuDesc.textContent = "사용 불가능 (GPU 미감지)";
                 }
                 
                 // Populate Selects
                 const selects = ["main", "god", "bot1", "bot2", "bot3"].map(id => document.getElementById('setup-model-' + id));
                 selects.forEach(sel => {
-                    sel.innerHTML = "";
-                    data.models.forEach(m => {
-                        const opt = document.createElement('option');
-                        opt.value = m;
-                        opt.textContent = m;
-                        sel.appendChild(opt);
-                    });
+                    if (sel) {
+                        sel.innerHTML = "";
+                        data.models.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = m;
+                            opt.textContent = m;
+                            sel.appendChild(opt);
+                        });
+                    }
                 });
                 
             } catch (e) {
@@ -227,6 +267,11 @@ let currentPostId = null;
                 document.getElementById('setup-hw-status').textContent = "오류 발생";
                 document.getElementById('setup-hw-desc').textContent = "서버와 통신할 수 없습니다.";
             }
+        }
+
+        function closeSetupModal() {
+            document.getElementById('setup-modal').classList.add('hidden');
+            setupModalOpen = false;
         }
 
         async function startSetupSequence() {
@@ -240,10 +285,11 @@ let currentPostId = null;
                 inference_mode: document.querySelector('input[name="inference_mode"]:checked').value,
                 hardware_mode: document.querySelector('input[name="hardware_mode"]:checked').value,
                 model_main: document.getElementById('setup-model-main').value,
-                model_god: document.getElementById('setup-model-god').value,
-                model_bot1: document.getElementById('setup-model-bot1').value,
-                model_bot2: document.getElementById('setup-model-bot2').value,
-                model_bot3: document.getElementById('setup-model-bot3').value
+                model_god: document.getElementById('setup-model-god') ? document.getElementById('setup-model-god').value : "",
+                model_bot1: document.getElementById('setup-model-bot1') ? document.getElementById('setup-model-bot1').value : "",
+                model_bot2: document.getElementById('setup-model-bot2') ? document.getElementById('setup-model-bot2').value : "",
+                model_bot3: document.getElementById('setup-model-bot3') ? document.getElementById('setup-model-bot3').value : "",
+                llama_server_path: document.getElementById('setup-llama-path') ? document.getElementById('setup-llama-path').value : "llama-server"
             };
             
             try {
@@ -270,7 +316,8 @@ let currentPostId = null;
                 
                 document.getElementById('setup-progress-bar').style.width = pct + "%";
                 document.getElementById('setup-progress-text').textContent = `[${data.completed}/${data.total}] ${pct}%`;
-                document.getElementById('setup-current-task').textContent = data.current_task;
+                const currentTaskEl = document.getElementById('setup-current-task');
+                if (currentTaskEl) currentTaskEl.textContent = data.current_task;
                 
                 if (!data.is_running && data.completed > 0 && data.total > 0 && data.completed === data.total) {
                     clearInterval(setupPolling);
@@ -311,6 +358,9 @@ let currentPostId = null;
                 
                 if (posts.length === 0) {
                     container.innerHTML = '<div class="text-sm text-gray-400 italic text-center py-4">게시글이 없습니다.</div>';
+                    if (systemStatusMap && systemStatusMap.state === "IDLE" && !setupModalOpen) {
+                        openSetupModal();
+                    }
                     return;
                 }
 
@@ -1054,10 +1104,10 @@ let currentPostId = null;
         fetchBotStates();
         fetchPostList();
 
-        setInterval(fetchSystemStatus, 1500);
-        setInterval(fetchBotStates, 2000);
-        setInterval(fetchPostList, 5000);
-        setInterval(fetchPostDetail, 2000);
+        setInterval(fetchSystemStatus, 1000);
+        setInterval(fetchBotStates, 1500);
+        setInterval(fetchPostList, 3000);
+        setInterval(fetchPostDetail, 1000);
 
         // Resume fast polling if tab becomes visible
         document.addEventListener('visibilitychange', () => {

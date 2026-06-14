@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("[System] Shutting down AMEVA-DeadInternetSociety...")
+    stop_native_server()
 
 app = FastAPI(title="AMEVA-DeadInternetSociety", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="src/ui/static"), name="static")
@@ -390,13 +391,28 @@ async def get_bot_inspector_detail(
 async def get_system_status():
     import subprocess
     try:
-        result = await asyncio.to_thread(
-            subprocess.run, 
-            ["docker", "ps", "--format", "{{.Names}}"], 
-            capture_output=True, 
-            text=True
-        )
-        running = result.stdout.strip().split("\n")
+        if os.name == 'nt':
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run, 
+                    ["docker", "ps", "--format", "{{.Names}}"], 
+                    capture_output=True, 
+                    text=True
+                )
+                running = result.stdout.strip().split("\n")
+            except FileNotFoundError:
+                running = []
+        else:
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run, 
+                    ["docker", "ps", "--format", "{{.Names}}"], 
+                    capture_output=True, 
+                    text=True
+                )
+                running = result.stdout.strip().split("\n")
+            except FileNotFoundError:
+                running = []
         
         containers = ["ameva-llm-main", "ameva-llm-god", "ameva-llm-bot-1", "ameva-llm-bot-2", "ameva-llm-bot-3"]
         status = {}
@@ -408,6 +424,7 @@ async def get_system_status():
             "checkpoint": state_manager.checkpoint.value,
             "is_command_running": state_manager.is_command_running,
             "last_error": state_manager.last_error_message,
+            "current_activity": getattr(state_manager, "current_activity", "대기 중..."),
             "containers": status
         }
     except Exception as e:
@@ -417,6 +434,7 @@ async def get_system_status():
             "checkpoint": state_manager.checkpoint.value,
             "is_command_running": state_manager.is_command_running,
             "last_error": str(e),
+            "current_activity": getattr(state_manager, "current_activity", "대기 중..."),
             "containers": {}
         }
 
@@ -433,18 +451,152 @@ import yaml
 
 startup_status = {"total": 0, "completed": 0, "current_task": "Waiting...", "is_running": False}
 
+import psutil
+
+native_server_process = None
+
+def kill_process_on_port(port: int):
+    import psutil
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            connections = proc.connections(kind='inet')
+            for conn in connections:
+                if conn.laddr.port == port:
+                    logger.info(f"[KILL PORT] Found process {proc.info['name']} (PID {proc.info['pid']}) on port {port}. Terminating...")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except psutil.TimeoutExpired:
+                        logger.warning(f"[KILL PORT] Process {proc.info['pid']} did not terminate. Killing...")
+                        proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+        except Exception as e:
+            logger.warning(f"[KILL PORT] Error checking process: {e}")
+
+def get_native_llama_cmd(server_path: str, model_name: str, hardware_mode: str) -> list:
+    import sys
+    import shutil
+    
+    model_path = os.path.join("models", "llm", model_name)
+    if not os.path.exists(model_path):
+        parent_path = os.path.join("..", "models", "llm", model_name)
+        if os.path.exists(parent_path):
+            model_path = parent_path
+            
+    # If the user provided just "llama-server" and it's not in PATH, use python -m llama_cpp.server
+    cmd = []
+    if server_path == "llama-server" and shutil.which("llama-server") is None:
+        cmd = [sys.executable, "-m", "llama_cpp.server"]
+    else:
+        cmd = [server_path]
+        
+    cmd.extend([
+        "--model", model_path,
+        "--n_ctx", "4096",
+        "--host", "0.0.0.0",
+        "--port", "8101"
+    ])
+    
+    hw = hardware_mode
+    if hw == "gpu":
+        hw = get_recommended_gpu_backend()
+    
+    if hw in ["cuda", "vulkan"]:
+        cmd.extend(["--n_gpu_layers", "99"])
+        
+    return cmd
+
+def start_native_server(server_path: str, model_name: str, hardware_mode: str):
+    global native_server_process
+    stop_native_server()
+    
+    # Ensure port 8101 is clean before starting
+    kill_process_on_port(8101)
+    
+    cmd = get_native_llama_cmd(server_path, model_name, hardware_mode)
+    logger.info(f"[NATIVE] Spawning server command: {' '.join(cmd)}")
+    
+    try:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+        native_server_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo
+        )
+        logger.info(f"[NATIVE] Server process started with PID {native_server_process.pid}")
+    except FileNotFoundError:
+        logger.error(f"[NATIVE ERROR] Failed to start native server: '{server_path}' not found. Please pip install llama-cpp-python[server] or set correct path.")
+        raise RuntimeError(f"'{server_path}' (또는 llama-cpp-python[server]) 파일을 찾을 수 없습니다. (환경변수 PATH 확인 또는 올바른 경로 입력 필요)")
+    except Exception as e:
+        logger.error(f"[NATIVE ERROR] Failed to start native server: {e}")
+        raise
+
+def stop_native_server():
+    global native_server_process
+    if native_server_process:
+        logger.info(f"[NATIVE] Terminating native server process {native_server_process.pid}")
+        try:
+            native_server_process.terminate()
+            native_server_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("[NATIVE] Process did not terminate, killing...")
+            try:
+                native_server_process.kill()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[NATIVE] Exception terminating process: {e}")
+        native_server_process = None
+    
+    # Force double-check kill on 8101 port
+    kill_process_on_port(8101)
+
+def get_recommended_gpu_backend() -> str:
+    try:
+        import subprocess
+        # Get GPU name using nvidia-smi
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True
+        )
+        gpu_name = result.stdout.strip()
+        logger.info(f"[GPU DETECTION] Detected GPU: {gpu_name}")
+        # If it's a GTX card, recommend vulkan
+        if "GTX" in gpu_name:
+            logger.info("[GPU DETECTION] GTX card detected. Recommending Vulkan.")
+            return "vulkan"
+        else:
+            logger.info("[GPU DETECTION] RTX or other card detected. Recommending CUDA.")
+            return "cuda"
+    except Exception as e:
+        logger.warning(f"[GPU DETECTION] Failed to detect GPU name: {e}. Defaulting to vulkan.")
+        return "vulkan"
+
 @app.get("/api/system/setup-info")
 async def get_setup_info():
-    hardware_status = {"cpu": True, "gpu_found": False, "cuda_available": False, "details": "CPU Only"}
+    hardware_status = {"cpu": True, "gpu_found": False, "cuda_available": False, "recommended_gpu_backend": "cpu", "details": "CPU Only"}
     try:
-        # GPU 존재 여부 체크 (nvidia-smi)
-        result = await asyncio.to_thread(subprocess.run, ["nvidia-smi"], capture_output=True, text=True)
-        if result.returncode == 0:
-            hardware_status["gpu_found"] = True
-            hardware_status["cuda_available"] = True
-            hardware_status["details"] = "GPU + CUDA Available"
-        else:
-            hardware_status["details"] = "GPU Not Found (nvidia-smi failed)"
+        try:
+            result = await asyncio.to_thread(subprocess.run, ["nvidia-smi"], capture_output=True, text=True)
+            if result.returncode == 0:
+                hardware_status["gpu_found"] = True
+                hardware_status["cuda_available"] = True
+                backend = await asyncio.to_thread(get_recommended_gpu_backend)
+                hardware_status["recommended_gpu_backend"] = backend
+                if backend == "vulkan":
+                    hardware_status["details"] = "GPU 가속 가능 (GTX 계열 감지: Vulkan 권장)"
+                else:
+                    hardware_status["details"] = "GPU 가속 가능 (CUDA 권장)"
+            else:
+                hardware_status["details"] = "GPU Not Found (nvidia-smi failed)"
+        except FileNotFoundError:
+            hardware_status["details"] = "GPU Not Found (nvidia-smi not in PATH)"
     except Exception:
         hardware_status["details"] = "GPU Not Found (nvidia-smi not in PATH)"
 
@@ -479,14 +631,47 @@ class SetupStartReq(BaseModel):
     model_bot1: str = ""
     model_bot2: str = ""
     model_bot3: str = ""
+    llama_server_path: Optional[str] = "llama-server"
 
 async def do_startup_sequence(req: SetupStartReq):
     global startup_status
     try:
+        if req.inference_mode == "local_native":
+            startup_status["total"] = 1
+            state_manager.current_activity = "로컬 llama-server 프로세스 실행 중..."
+            startup_status["current_task"] = "Starting native llama-server..."
+            
+            # Start native server
+            await asyncio.to_thread(
+                start_native_server,
+                server_path=req.llama_server_path or "llama-server",
+                model_name=req.model_main,
+                hardware_mode=req.hardware_mode
+            )
+            
+            # Wait for ready url
+            from src.orchestration.runner import wait_for_http_ready
+            ready_url = "http://localhost:8101/health"
+            ready = await wait_for_http_ready(ready_url, timeout=60, interval=1)
+            if not ready:
+                raise RuntimeError("로컬 llama-server 기동 실패 (헬스체크 타임아웃)")
+                
+            startup_status["completed"] = 1
+            state_manager.current_activity = "로컬 llama-server 구동 완료. 세션을 준비 중..."
+            startup_status["current_task"] = "Startup complete. Preparing session..."
+            await asyncio.sleep(1)
+            startup_status["is_running"] = False
+            
+            state_manager.set_state(SystemState.RUNNING)
+            asyncio.create_task(run_session(inference_mode=req.inference_mode))
+            return
+
+        state_manager.current_activity = "도커 데몬 상태 확인 중..."
         startup_status["current_task"] = "Checking Docker daemon..."
         try:
             subprocess.run(["docker", "info"], check=True, capture_output=True)
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            state_manager.current_activity = "도커 데스크탑 실행 중 (최대 1분 소요)..."
             startup_status["current_task"] = "Starting Docker Desktop... (Please wait up to 1 min)"
             docker_path = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
             if os.path.exists(docker_path):
@@ -505,12 +690,16 @@ async def do_startup_sequence(req: SetupStartReq):
             else:
                 raise Exception("Docker Desktop is not running and could not be found at C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe.")
 
+        state_manager.current_activity = "기존 컨테이너 종료 중..."
         startup_status["current_task"] = "Stopping existing containers..."
         cmd_down = ["docker", "compose", "-f", "docker/docker-compose.yml"]
         if os.path.exists("docker/docker-compose.override.yml"):
             cmd_down.extend(["-f", "docker/docker-compose.override.yml"])
         cmd_down.append("down")
-        await asyncio.to_thread(subprocess.run, cmd_down, capture_output=True)
+        try:
+            await asyncio.to_thread(subprocess.run, cmd_down, capture_output=True)
+        except FileNotFoundError:
+            pass
 
         containers_to_start = ["dozzle"]
         if req.inference_mode == "parallel":
@@ -521,13 +710,18 @@ async def do_startup_sequence(req: SetupStartReq):
         startup_status["total"] = len(containers_to_start)
         
         for i, c in enumerate(containers_to_start):
+            state_manager.current_activity = f"[{i+1}/{len(containers_to_start)}] 도커 컨테이너 {c} 구동 중..."
             startup_status["current_task"] = f"[{i+1}/{len(containers_to_start)}] Starting {c}..."
             svc_name = c.replace("ameva-", "") if "ameva-" in c else c
             cmd_up = ["docker", "compose", "-f", "docker/docker-compose.yml", "-f", "docker/docker-compose.override.yml", "up", "-d", svc_name]
-            await asyncio.to_thread(subprocess.run, cmd_up, capture_output=True)
+            try:
+                await asyncio.to_thread(subprocess.run, cmd_up, capture_output=True)
+            except FileNotFoundError:
+                raise RuntimeError("Docker가 설치되어 있지 않거나 PATH에 없습니다.")
             startup_status["completed"] = i + 1
             await asyncio.sleep(0.5)
             
+        state_manager.current_activity = "도커 컨테이너 구동 완료. 세션을 준비 중..."
         startup_status["current_task"] = "Startup complete. Preparing session..."
         await asyncio.sleep(1)
         startup_status["is_running"] = False
@@ -536,6 +730,7 @@ async def do_startup_sequence(req: SetupStartReq):
         asyncio.create_task(run_session(inference_mode=req.inference_mode))
     except Exception as e:
         logger.error(f"Startup error: {e}")
+        state_manager.current_activity = f"초기화 에러: {str(e)}"
         startup_status["current_task"] = f"Error: {str(e)}"
         startup_status["is_running"] = False
         state_manager.push_event("ERROR", {"message": f"Startup failed: {str(e)}"})
@@ -547,6 +742,14 @@ async def setup_and_start(req: SetupStartReq):
         return {"error": "System is not in IDLE state."}
         
     state_manager.set_state(SystemState.RUNNING)
+    state_manager.current_activity = "설정 파일 구성 중..."
+    state_manager.inference_mode = req.inference_mode
+    
+    # Save parameters for self-healing
+    state_manager.llama_server_path = req.llama_server_path or "llama-server"
+    state_manager.model_main = req.model_main
+    state_manager.hardware_mode = req.hardware_mode
+    
     startup_status["is_running"] = True
     startup_status["total"] = 5
     startup_status["completed"] = 0
@@ -565,12 +768,18 @@ async def setup_and_start(req: SetupStartReq):
         "llm-bot-3": req.model_bot3
     }
     
+    # Resolve 'gpu' to recommended backend
+    hw_mode = req.hardware_mode
+    if hw_mode == "gpu":
+        hw_mode = get_recommended_gpu_backend()
+        logger.info(f"[SETUP] Resolved hardware_mode 'gpu' to '{hw_mode}'")
+    
     for svc, model in services.items():
         if not model: continue
         svc_config = {
             "command": f"-m /models/llm/{model} -c 4096 --host 0.0.0.0 --port 8080"
         }
-        if req.hardware_mode == "cuda":
+        if hw_mode == "cuda":
             svc_config["image"] = "ghcr.io/ggml-org/llama.cpp:server-cuda"
             svc_config["deploy"] = {
                 "resources": {
@@ -581,7 +790,7 @@ async def setup_and_start(req: SetupStartReq):
                     }
                 }
             }
-        elif req.hardware_mode == "vulkan":
+        elif hw_mode == "vulkan":
             svc_config["image"] = "ghcr.io/ggml-org/llama.cpp:server-vulkan"
             svc_config["deploy"] = {
                 "resources": {
@@ -718,15 +927,17 @@ if __name__ == "__main__":
     import os
     
     print("[System] 자동 실행: 도커 컨테이너(Dozzle 및 AI 봇들)를 시작합니다...")
+    # docker-compose.yml의 web-app을 제외한 나머지 서비스들만 구동 (포트 충돌 방지)
+    # VRAM 최적화 모드: 초기에는 Dozzle(로그 뷰어)만 시작하고 LLM들은 동적으로 구동/종료
+    compose_cmd = [
+        "docker", "compose", "-f", "docker/docker-compose.yml", 
+        "up", "-d", "dozzle"
+    ]
     try:
-        # docker-compose.yml의 web-app을 제외한 나머지 서비스들만 구동 (포트 충돌 방지)
-        # VRAM 최적화 모드: 초기에는 Dozzle(로그 뷰어)만 시작하고 LLM들은 동적으로 구동/종료
-        compose_cmd = [
-            "docker", "compose", "-f", "docker/docker-compose.yml", 
-            "up", "-d", "dozzle"
-        ]
         subprocess.run(compose_cmd, check=True)
         print("[System] 도커 컨테이너 구동 완료.")
+    except FileNotFoundError:
+        print("[System ERROR] Docker가 설치되어 있지 않거나 환경변수 PATH에 없습니다. (도커 없이 로컬 모드에서 실행 가능합니다)")
     except Exception as e:
         print(f"[System ERROR] 도커 컨테이너를 시작하는 중 오류 발생: {e}")
         print("[System] 'docker compose up -d' 명령어를 직접 확인해주세요.")
@@ -739,5 +950,8 @@ if __name__ == "__main__":
         try:
             subprocess.run(["docker", "compose", "-f", "docker/docker-compose.yml", "down"], check=True)
             print("[System] 도커 컨테이너 종료 완료.")
+        except FileNotFoundError:
+            pass
         except Exception as e:
             print(f"[System ERROR] 도커 컨테이너 종료 중 오류 발생: {e}")
+        stop_native_server()

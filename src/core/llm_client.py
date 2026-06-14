@@ -74,7 +74,12 @@ class LLMClient:
         if not self.container_name:
             return
             
-        logger.info(f"[LIFECYCLE] Starting container '{self.container_name}'...")
+        from src.orchestration.state_manager import state_manager
+        
+        activity_msg = f"컨테이너 '{self.container_name}' 기동 중..."
+        logger.info(f"[LIFECYCLE] {activity_msg}")
+        state_manager.current_activity = activity_msg
+        
         try:
             # 컨테이너 시작 (docker compose up -d 사용으로 미존재 시 자동 생성)
             service_name = self.container_name.replace("ameva-", "")
@@ -84,7 +89,10 @@ class LLMClient:
                 cmd.extend(["-f", "docker/docker-compose.override.yml"])
             cmd.extend(["up", "-d", service_name])
             subprocess.run(cmd, check=True, capture_output=True)
+            
+            waiting_msg = f"'{self.container_name}' API 준비 상태 확인 중..."
             logger.info(f"[LIFECYCLE] '{self.container_name}' started. Waiting for API readiness...")
+            state_manager.current_activity = waiting_msg
             
             # API 준비 대기 (Max 120 seconds)
             async with httpx.AsyncClient() as client:
@@ -94,7 +102,9 @@ class LLMClient:
                         if res.status_code == 200:
                             data = res.json()
                             if data.get("status") == "ok":
-                                logger.info(f"[LIFECYCLE] '{self.container_name}' API is ready.")
+                                ready_msg = f"'{self.container_name}' API 준비 완료."
+                                logger.info(f"[LIFECYCLE] {ready_msg}")
+                                state_manager.current_activity = ready_msg
                                 return
                     except httpx.RequestError:
                         pass
@@ -109,7 +119,12 @@ class LLMClient:
         if not self.container_name:
             return
             
-        logger.info(f"[LIFECYCLE] Stopping container '{self.container_name}'...")
+        from src.orchestration.state_manager import state_manager
+        
+        activity_msg = f"컨테이너 '{self.container_name}' 종료 중..."
+        logger.info(f"[LIFECYCLE] {activity_msg}")
+        state_manager.current_activity = activity_msg
+        
         try:
             service_name = self.container_name.replace("ameva-", "")
             cmd = ["docker", "compose", "-f", "docker/docker-compose.yml"]
@@ -118,7 +133,10 @@ class LLMClient:
                 cmd.extend(["-f", "docker/docker-compose.override.yml"])
             cmd.extend(["stop", service_name])
             subprocess.run(cmd, check=True, capture_output=True)
-            logger.info(f"[LIFECYCLE] '{self.container_name}' stopped.")
+            
+            stopped_msg = f"'{self.container_name}' 종료 완료."
+            logger.info(f"[LIFECYCLE] {stopped_msg}")
+            state_manager.current_activity = stopped_msg
         except Exception as e:
             logger.error(f"[LIFECYCLE ERROR] Failed to stop '{self.container_name}': {e}")
 

@@ -26,5 +26,12 @@ if %errorlevel% neq 0 (
 echo ===================================================
 echo  Setup completed successfully!
 echo ===================================================
+echo.
+echo [TIPS] To run the simulation in Local Native mode:
+echo   1. Ensure you have llama-server.exe built/downloaded locally.
+echo   2. In the setup modal, choose "로컬 직접 실행" and enter its path.
+echo.
+echo Launch command: python run.py
+echo ===================================================
 pause
 exit /b 0

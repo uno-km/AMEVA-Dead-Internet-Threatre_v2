@@ -248,7 +248,7 @@ def calculate_effective_anger(anger_dict: dict) -> float:
     return math.sqrt(sum_sq)
 
 
-async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: list) -> dict:
+async def evaluate_spectator_anger(ctx: SessionContext, speaker: str, comment_text: str, spectators: list) -> dict:
     """God LLM evaluates targeted anger increases for the spectators.
     Returns nested dict:
     {
@@ -275,6 +275,9 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
         f"\"{spec_2}\": {{\"increase\": 5, \"target\": \"{speaker}\"}}"
         f"}}"
     )
+
+    from src.orchestration.state_manager import state_manager
+    state_manager.current_activity = "시스템 조율 LLM이 대화에 따른 감정 전이도 평가 중..."
 
     async with ctx.god_llm.lifecycle():
         result = await ctx.god_llm.generate_completion(
@@ -314,7 +317,7 @@ async def evaluate_spectator_anger(speaker: str, comment_text: str, spectators: 
 
         data = json.loads(json_str)
 
-        def parse_entry(ctx: SessionContext, raw_val, default_target):
+        def parse_entry(raw_val, default_target):
             increase = 0
             target = default_target
 
@@ -605,10 +608,11 @@ async def create_post_with_main_llm(ctx: SessionContext, db, session):
 
 
 async def run_session(inference_mode: str = "sequential"):
-    if inference_mode == "local_single_model":
-        logger.info("[MODE] Starting in local_single_model mode. All agents will share ameva-llm-main.")
-        shared_client = LLMClient("http://localhost:8101", "ameva-llm-main")
-        shared_client.auto_lifecycle = False  # Disable lifecycle, assuming it's kept alive
+    if inference_mode in ["local_single_model", "local_native"]:
+        logger.info(f"[MODE] Starting in {inference_mode} mode. All agents will share the main model server on port 8101.")
+        container = "ameva-llm-main" if inference_mode == "local_single_model" else None
+        shared_client = LLMClient("http://localhost:8101", container)
+        shared_client.auto_lifecycle = False
         
         ctx = SessionContext(
             inference_mode=inference_mode,
@@ -620,20 +624,42 @@ async def run_session(inference_mode: str = "sequential"):
                 "bot_3": shared_client
             }
         )
-        # Start it once if not running
-        await shared_client.start_container()
+        if inference_mode == "local_single_model":
+            await shared_client.start_container()
+        else:
+            ready_url = "http://localhost:8101/health"
+            ready = await wait_for_http_ready(ready_url, timeout=60, interval=1)
+            if not ready:
+                raise ConnectionError("Local native llama-server was not ready.")
     else:
-        # Default sequential
+        logger.info(f"[MODE] Starting in {inference_mode} mode. Running all agents with dedicated endpoints.")
+        main_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+        main_client.auto_lifecycle = False
+        god_client = LLMClient("http://localhost:8105", "ameva-llm-god")
+        god_client.auto_lifecycle = False
+        bot1_client = LLMClient("http://localhost:8102", "ameva-llm-bot-1")
+        bot1_client.auto_lifecycle = False
+        bot2_client = LLMClient("http://localhost:8103", "ameva-llm-bot-2")
+        bot2_client.auto_lifecycle = False
+        bot3_client = LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+        bot3_client.auto_lifecycle = False
+        
         ctx = SessionContext(
             inference_mode=inference_mode,
-            main_llm=LLMClient("http://localhost:8101", "ameva-llm-main"),
-            god_llm=LLMClient("http://localhost:8105", "ameva-llm-god"),
+            main_llm=main_client,
+            god_llm=god_client,
             bots={
-                "bot_1": LLMClient("http://localhost:8102", "ameva-llm-bot-1"),
-                "bot_2": LLMClient("http://localhost:8103", "ameva-llm-bot-2"),
-                "bot_3": LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+                "bot_1": bot1_client,
+                "bot_2": bot2_client,
+                "bot_3": bot3_client
             }
         )
+        logger.info("[MODE] Waiting for all containers to respond to health checks...")
+        await main_client.start_container()
+        await god_client.start_container()
+        await bot1_client.start_container()
+        await bot2_client.start_container()
+        await bot3_client.start_container()
 
     db = SessionLocal()
     try:
@@ -687,14 +713,24 @@ async def run_session(inference_mode: str = "sequential"):
 async def create_initial_stances(ctx: SessionContext, db, post):
     logger.info("[PHASE 1] Initial Stance Declaration (Sequential & Random)")
 
+    from src.orchestration.state_manager import state_manager
+
     stances = []
     initial_order = ["bot_1", "bot_2", "bot_3"]
+    # 봇 기동 순서를 랜덤하게 결정
+    random.shuffle(initial_order)
+
+    last_comment = None
+    last_speaker = None
 
     for b_name in initial_order:
         if state_manager.state == SystemState.STOPPING:
             raise InterruptedError("SESSION_STOPPED")
             
         await smart_sleep()
+        
+        state_manager.current_activity = f"초기 스탠스 선언: {b_name} 댓글 생성 중..."
+        
         try:
             persona = await PersonaManager.get_persona(b_name)
             bot_client = ctx.bots[b_name]
@@ -748,6 +784,21 @@ async def create_initial_stances(ctx: SessionContext, db, post):
                 ]
                 reply_content = random.choice(fallback_stances)
 
+            # 생성 즉시 개별적으로 데이터베이스에 삽입 및 커밋하여 실시간 화면 렌더링 지원
+            c = Comment(
+                post_id=post.id,
+                parent_id=None,
+                bot_name=b_name,
+                content=reply_content
+            )
+            db.add(c)
+            db.commit()
+            db.refresh(c)
+
+            logger.info(f"[{b_name.upper()}] Initial Stance: {reply_content}")
+            last_comment = c
+            last_speaker = b_name
+
             stances.append((b_name, reply_content))
 
         except ConnectionError as ce:
@@ -757,36 +808,24 @@ async def create_initial_stances(ctx: SessionContext, db, post):
             raise InterruptedError("LLM_CONNECTION_FAILED")
         except Exception as e:
             logger.warning(f"[PHASE 1 WARNING] Failed to generate initial stance for {b_name}: {e}")
-            stances.append((b_name, "I believe opinions are bound to be divided on this topic."))
-
-    # DB 삽입 순서 랜덤화
-    random.shuffle(stances)
-
-    last_comment = None
-    last_speaker = None
-
-    for b_name, reply_content in stances:
-        c = Comment(
-            post_id=post.id,
-            parent_id=None,
-            bot_name=b_name,
-            content=reply_content
-        )
-        db.add(c)
-        db.commit()
-        db.refresh(c)
-
-        logger.info(f"[{b_name.upper()}] Initial Stance: {reply_content}")
-        last_comment = c
-        last_speaker = b_name
+            fallback_text = "I believe opinions are bound to be divided on this topic."
+            c = Comment(
+                post_id=post.id,
+                parent_id=None,
+                bot_name=b_name,
+                content=fallback_text
+            )
+            db.add(c)
+            db.commit()
+            db.refresh(c)
+            last_comment = c
+            last_speaker = b_name
+            stances.append((b_name, fallback_text))
 
     if not last_speaker:
         last_speaker = random.choice(initial_order)
 
     return stances, last_comment, last_speaker
-
-
-
 
 
 async def generate_relay_reply(
@@ -957,7 +996,7 @@ async def generate_relay_reply(
 
 async def apply_spectator_anger(ctx: SessionContext, db, current_bot, reply_content):
     spectators = [b for b in ctx.bots.keys() if b != current_bot]
-    anger_increases = await evaluate_spectator_anger(current_bot, reply_content, spectators)
+    anger_increases = await evaluate_spectator_anger(ctx, current_bot, reply_content, spectators)
 
     for spec_name, data in anger_increases.items():
         try:
@@ -1074,9 +1113,11 @@ async def run_relay_phase(ctx: SessionContext, db, session, post, last_comment, 
         try:
                 current_bot = get_next_speaker(db, last_speaker, last_mentioned)
                 logger.info(f"--- TURN {turn_idx+1}: {current_bot.upper()} ---")
-    
+                from src.orchestration.state_manager import state_manager
+                state_manager.current_activity = f"[{turn_idx+1}/20 턴] {current_bot} 댓글 작성 중..."
+
                 reply_content, mentioned = await generate_relay_reply(
-                    db, post, current_bot, turn_idx,
+                    ctx, db, post, current_bot, turn_idx,
                     last_comment_text=last_comment_text,
                     last_speaker=last_speaker,
                 )
@@ -1182,10 +1223,84 @@ async def restart_session(session_id: int):
             ("ameva-llm-bot-3", 8104),
         ]
 
-        # 신 LLM 및 봇들을 상시 켜둠
-        async with llm_lifecycle("ameva-llm-god", 8105):
-            async with multi_llm_lifecycle(bot_targets):
-                await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
+        # Initialize context for restart session based on inference mode
+        inference_mode = getattr(state_manager, "inference_mode", "sequential") or "sequential"
+        if inference_mode in ["local_single_model", "local_native"]:
+            logger.info(f"[MODE] Restarting in {inference_mode} mode. All agents will share port 8101.")
+            container = "ameva-llm-main" if inference_mode == "local_single_model" else None
+            shared_client = LLMClient("http://localhost:8101", container)
+            shared_client.auto_lifecycle = False
+            ctx = SessionContext(
+                inference_mode=inference_mode,
+                main_llm=shared_client,
+                god_llm=shared_client,
+                bots={
+                    "bot_1": shared_client,
+                    "bot_2": shared_client,
+                    "bot_3": shared_client
+                }
+            )
+            
+            if inference_mode == "local_native":
+                # Self-healing check for native server
+                ready = False
+                try:
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        res = await client.get("http://localhost:8101/health", timeout=2.0)
+                        if res.status_code == 200 and res.json().get("status") == "ok":
+                            ready = True
+                except Exception:
+                    pass
+                    
+                if not ready:
+                    logger.warning("[RESTART NATIVE] Local native server not running on 8101. Attempting restart...")
+                    from run import start_native_server
+                    start_native_server(
+                        server_path=getattr(state_manager, "llama_server_path", "llama-server"),
+                        model_name=getattr(state_manager, "model_main", ""),
+                        hardware_mode=getattr(state_manager, "hardware_mode", "cpu")
+                    )
+                    
+                ready_url = "http://localhost:8101/health"
+                ready = await wait_for_http_ready(ready_url, timeout=60, interval=1)
+                if not ready:
+                    raise ConnectionError("Local native llama-server was not ready after restart.")
+            else:
+                await shared_client.start_container()
+                
+            await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
+        else:
+            logger.info(f"[MODE] Restarting in {inference_mode} mode with dedicated endpoints.")
+            main_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+            main_client.auto_lifecycle = False
+            god_client = LLMClient("http://localhost:8105", "ameva-llm-god")
+            god_client.auto_lifecycle = False
+            bot1_client = LLMClient("http://localhost:8102", "ameva-llm-bot-1")
+            bot1_client.auto_lifecycle = False
+            bot2_client = LLMClient("http://localhost:8103", "ameva-llm-bot-2")
+            bot2_client.auto_lifecycle = False
+            bot3_client = LLMClient("http://localhost:8104", "ameva-llm-bot-3")
+            bot3_client.auto_lifecycle = False
+            
+            ctx = SessionContext(
+                inference_mode=inference_mode,
+                main_llm=main_client,
+                god_llm=god_client,
+                bots={
+                    "bot_1": bot1_client,
+                    "bot_2": bot2_client,
+                    "bot_3": bot3_client
+                }
+            )
+            # Pre-start all containers
+            await main_client.start_container()
+            await god_client.start_container()
+            await bot1_client.start_container()
+            await bot2_client.start_container()
+            await bot3_client.start_container()
+            
+            await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
         
         logger.info("[ORCHESTRATOR] [RESTART END] Completed relay phase.")
         state_manager.set_state(SystemState.IDLE)
