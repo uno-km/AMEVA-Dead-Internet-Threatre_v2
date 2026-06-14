@@ -52,7 +52,10 @@ class LLMClient:
         req_timeout = timeout if timeout is not None else self.timeout
 
         endpoint_lock = get_endpoint_lock(self.base_url)
+        from src.orchestration.state_manager import state_manager
         async with endpoint_lock:
+            if self.container_name:
+                state_manager.active_llm = self.container_name
             try:
                 logger.info(f"[NETWORK] Routing data to {self.base_url}/v1/chat/completions (Max Tokens: {max_tokens}, Timeout: {req_timeout}, Temp: {temperature})")
                 async with httpx.AsyncClient(timeout=req_timeout) as client:
@@ -68,6 +71,9 @@ class LLMClient:
             except Exception as e:
                 logger.error(f"[ERROR] LLM API call failed: {e}")
                 raise ConnectionError(f"LLM API Failed: {e}")
+            finally:
+                if self.container_name and state_manager.active_llm == self.container_name:
+                    state_manager.active_llm = None
 
     async def start_container(self):
         """도커 컨테이너 구동 및 헬스체크 대기"""

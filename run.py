@@ -418,7 +418,10 @@ async def get_system_status():
         containers = ["ameva-llm-main", "ameva-llm-god", "ameva-llm-bot-1", "ameva-llm-bot-2", "ameva-llm-bot-3"]
         status = {}
         for c in containers:
-            status[c] = "RUNNING" if c in running else "STOPPED"
+            if getattr(state_manager, "active_llm", None) == c:
+                status[c] = "RUNNING"
+            else:
+                status[c] = "RUNNING" if c in running else "STOPPED"
             
         return {
             "state": state_manager.state.value,
@@ -479,13 +482,20 @@ def get_native_llama_cmd(server_path: str, model_name: str, hardware_mode: str) 
     import sys
     import shutil
     
-    model_path = os.path.join("models", "llm", model_name)
+    # 절대 경로로 모델 파일을 탐색
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(base_dir, "models", "llm", model_name)
+    
     if not os.path.exists(model_path):
-        parent_path = os.path.join("..", "models", "llm", model_name)
-        if os.path.exists(parent_path):
-            model_path = parent_path
+        # 상위 폴더에서도 탐색
+        alt_path = os.path.join(base_dir, "..", "models", "llm", model_name)
+        alt_path = os.path.abspath(alt_path)
+        if os.path.exists(alt_path):
+            model_path = alt_path
+        else:
+            raise FileNotFoundError(f"Model file not found: {model_path}. Please place your GGUF model in models/llm/ folder.")
             
-    # If the user provided just "llama-server" or "자동 (내장 서버)" and it's not in PATH, use python -m llama_cpp.server
+    # llama-server 또는 자동(내장 서버) 선택
     cmd = []
     if (server_path == "llama-server" or server_path == "자동 (내장 서버)") and shutil.which("llama-server") is None:
         cmd = [sys.executable, "-m", "llama_cpp.server"]
@@ -500,12 +510,17 @@ def get_native_llama_cmd(server_path: str, model_name: str, hardware_mode: str) 
     ])
     
     hw = hardware_mode
-    if hw == "gpu":
-        hw = get_recommended_gpu_backend()
+    if hw == "gpu" or hw == "auto":
+        hw_mode, _, gpu_layers, backend, _, _ = detect_hardware_and_get_config()
+        if hw_mode == "gpu":
+            cmd.extend(["--n_gpu_layers", str(gpu_layers)])
+            hw = backend
     
     if hw in ["cuda", "vulkan"]:
-        cmd.extend(["--n_gpu_layers", "99"])
+        if "--n_gpu_layers" not in cmd:
+            cmd.extend(["--n_gpu_layers", "-1"])
         
+    logger.info(f"[NATIVE] Final command: {' '.join(cmd)}")
     return cmd
 
 def start_native_server(server_path: str, model_name: str, hardware_mode: str):
@@ -560,48 +575,87 @@ def stop_native_server():
     # Force double-check kill on 8101 port
     kill_process_on_port(8101)
 
-def get_recommended_gpu_backend() -> str:
+def detect_hardware_and_get_config():
+    """
+    시스템의 GPU 상태를 확인하고, 그에 맞는 하드웨어 모드와 추천 모델 정보를 반환합니다.
+    """
+    # 1. nvidia-smi 명령어를 통한 감지 시도 (가장 확실하고 Python 3.12+ distutils 부재 문제 영향 없음)
     try:
         import subprocess
-        # Get GPU name using nvidia-smi
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True
+        res = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5
         )
-        gpu_name = result.stdout.strip()
-        logger.info(f"[GPU DETECTION] Detected GPU: {gpu_name}")
-        # If it's a GTX card, recommend vulkan
-        if "GTX" in gpu_name:
-            logger.info("[GPU DETECTION] GTX card detected. Recommending Vulkan.")
-            return "vulkan"
+        if res.returncode == 0:
+            lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
+            if lines:
+                parts = lines[0].split(",")
+                gpu_name = parts[0].strip()
+                gpu_memory = int(parts[1].strip())
+                logger.info(f"[하드웨어 감지] nvidia-smi로 GPU 환경 확인됨: {gpu_name} (VRAM: {gpu_memory}MB)")
+                
+                hardware_mode = "gpu"
+                recommended_model = "8B"
+                n_gpu_layers = -1
+                
+                # GPU Backend 결정 로직 (GTX는 vulkan, 이외는 cuda 권장)
+                if "GTX" in gpu_name:
+                    recommended_gpu_backend = "vulkan"
+                else:
+                    recommended_gpu_backend = "cuda"
+                    
+                details = f"GPU 가속 가능 ({gpu_name}, {recommended_gpu_backend} 권장)"
+                return hardware_mode, recommended_model, n_gpu_layers, recommended_gpu_backend, details, gpu_name
+    except Exception as e_smi:
+        logger.debug(f"[하드웨어 감지] nvidia-smi로 GPU 감지 실패: {e_smi}")
+
+    # 2. GPUtil을 사용한 기존 감지 시도 (폴백)
+    try:
+        import GPUtil
+        gpus = GPUtil.getGPUs()
+        
+        if len(gpus) > 0:
+            gpu_name = gpus[0].name
+            gpu_memory = gpus[0].memoryTotal
+            logger.info(f"[하드웨어 감지] GPUtil로 GPU 환경 확인됨: {gpu_name} (VRAM: {gpu_memory}MB)")
+            
+            hardware_mode = "gpu"
+            recommended_model = "8B"
+            n_gpu_layers = -1
+            
+            # GPU Backend 결정 로직 (GTX는 vulkan, 이외는 cuda 권장)
+            if "GTX" in gpu_name:
+                recommended_gpu_backend = "vulkan"
+            else:
+                recommended_gpu_backend = "cuda"
+                
+            details = f"GPU 가속 가능 ({gpu_name}, {recommended_gpu_backend} 권장)"
+            return hardware_mode, recommended_model, n_gpu_layers, recommended_gpu_backend, details, gpu_name
+            
         else:
-            logger.info("[GPU DETECTION] RTX or other card detected. Recommending CUDA.")
-            return "cuda"
+            logger.info("[하드웨어 감지] 인식된 외장 GPU가 없습니다. CPU 환경으로 폴백합니다.")
+            return "cpu", "3B", 0, "cpu", "CPU Only", "None"
     except Exception as e:
-        logger.warning(f"[GPU DETECTION] Failed to detect GPU name: {e}. Defaulting to vulkan.")
-        return "vulkan"
+        logger.warning(f"[하드웨어 감지] GPU 감지 중 오류 발생, 안전을 위해 CPU 모드로 강제 설정: {e}")
+        return "cpu", "3B", 0, "cpu", f"GPU Not Found ({e})", "None"
+
+def get_recommended_gpu_backend() -> str:
+    _, _, _, backend, _, _ = detect_hardware_and_get_config()
+    return backend
 
 @app.get("/api/system/setup-info")
 async def get_setup_info():
-    hardware_status = {"cpu": True, "gpu_found": False, "cuda_available": False, "recommended_gpu_backend": "cpu", "details": "CPU Only"}
-    try:
-        try:
-            result = await asyncio.to_thread(subprocess.run, ["nvidia-smi"], capture_output=True, text=True)
-            if result.returncode == 0:
-                hardware_status["gpu_found"] = True
-                hardware_status["cuda_available"] = True
-                backend = await asyncio.to_thread(get_recommended_gpu_backend)
-                hardware_status["recommended_gpu_backend"] = backend
-                if backend == "vulkan":
-                    hardware_status["details"] = "GPU 가속 가능 (GTX 계열 감지: Vulkan 권장)"
-                else:
-                    hardware_status["details"] = "GPU 가속 가능 (CUDA 권장)"
-            else:
-                hardware_status["details"] = "GPU Not Found (nvidia-smi failed)"
-        except FileNotFoundError:
-            hardware_status["details"] = "GPU Not Found (nvidia-smi not in PATH)"
-    except Exception:
-        hardware_status["details"] = "GPU Not Found (nvidia-smi not in PATH)"
+    hw_mode, _, _, backend, details, _ = await asyncio.to_thread(detect_hardware_and_get_config)
+    hardware_status = {
+        "cpu": True, 
+        "gpu_found": hw_mode == "gpu", 
+        "cuda_available": hw_mode == "gpu", 
+        "recommended_gpu_backend": backend, 
+        "details": details
+    }
 
     # 모델 파일 목록 읽기 (.gguf)
     models_dir = os.path.join("models", "llm")

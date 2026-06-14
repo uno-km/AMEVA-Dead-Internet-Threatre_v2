@@ -431,16 +431,16 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
         states = db.query(BotState).all()
     except Exception as e:
         logger.error(f"[QUEUE ERROR] Failed to load BotState rows: {e}")
-        fallback_candidates = [b for b in ctx.bots.keys() if b != last_speaker]
+        fallback_candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != last_speaker]
         if fallback_candidates:
             chosen = random.choice(fallback_candidates)
             logger.info(f"[QUEUE] DB fallback speaker selected: {chosen}")
             return chosen
-        chosen = random.choice(list(ctx.bots.keys()))
+        chosen = random.choice(["bot_1", "bot_2", "bot_3"])
         logger.info(f"[QUEUE] Hard fallback speaker selected: {chosen}")
         return chosen
 
-    anger_info = {b: 0.0 for b in ctx.bots.keys()}
+    anger_info = {b: 0.0 for b in ["bot_1", "bot_2", "bot_3"]}
 
     for s in states:
         try:
@@ -476,13 +476,13 @@ def get_next_speaker(db, last_speaker: str, last_mentioned: str) -> str:
             if getattr(s, "bot_name", None) in anger_info:
                 anger_info[s.bot_name] = 0.0
 
-    candidates = [b for b in ctx.bots.keys() if b != last_speaker]
+    candidates = [b for b in ["bot_1", "bot_2", "bot_3"] if b != last_speaker]
     # 모든 봇이 제외되는 이상 케이스 방어
     if not candidates:
-        candidates = list(ctx.bots.keys())
+        candidates = ["bot_1", "bot_2", "bot_3"]
     # 그래도 비어 있으면 치명적 설정 오류
     if not candidates:
-        raise RuntimeError("No available ctx.bots found in 'ctx.bots' dictionary.")
+        raise RuntimeError("No available bots found.")
     # tie 편향 방지: 먼저 섞고 정렬
     random.shuffle(candidates)
     # Sort candidates by effective anger
@@ -553,8 +553,7 @@ async def create_post_with_main_llm(ctx: SessionContext, db, session):
                 "You are an AI that writes forum posts. You only respond in JSON format.",
                 prompt,
                 max_tokens=500,
-                timeout=180.0,
-                response_format={"type": "json_object"}
+                timeout=180.0
             )
             
             # JSON 파싱 시도
@@ -610,22 +609,30 @@ async def create_post_with_main_llm(ctx: SessionContext, db, session):
 async def run_session(inference_mode: str = "sequential"):
     if inference_mode in ["local_single_model", "local_native"]:
         logger.info(f"[MODE] Starting in {inference_mode} mode. All agents will share the main model server on port 8101.")
-        container = "ameva-llm-main" if inference_mode == "local_single_model" else None
-        shared_client = LLMClient("http://localhost:8101", container)
-        shared_client.auto_lifecycle = False
+        main_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+        god_client = LLMClient("http://localhost:8101", "ameva-llm-god")
+        bot1_client = LLMClient("http://localhost:8101", "ameva-llm-bot-1")
+        bot2_client = LLMClient("http://localhost:8101", "ameva-llm-bot-2")
+        bot3_client = LLMClient("http://localhost:8101", "ameva-llm-bot-3")
+        
+        main_client.auto_lifecycle = False
+        god_client.auto_lifecycle = False
+        bot1_client.auto_lifecycle = False
+        bot2_client.auto_lifecycle = False
+        bot3_client.auto_lifecycle = False
         
         ctx = SessionContext(
             inference_mode=inference_mode,
-            main_llm=shared_client,
-            god_llm=shared_client,
+            main_llm=main_client,
+            god_llm=god_client,
             bots={
-                "bot_1": shared_client,
-                "bot_2": shared_client,
-                "bot_3": shared_client
+                "bot_1": bot1_client,
+                "bot_2": bot2_client,
+                "bot_3": bot3_client
             }
         )
         if inference_mode == "local_single_model":
-            await shared_client.start_container()
+            await main_client.start_container()
         else:
             ready_url = "http://localhost:8101/health"
             ready = await wait_for_http_ready(ready_url, timeout=60, interval=1)
@@ -1227,17 +1234,26 @@ async def restart_session(session_id: int):
         inference_mode = getattr(state_manager, "inference_mode", "sequential") or "sequential"
         if inference_mode in ["local_single_model", "local_native"]:
             logger.info(f"[MODE] Restarting in {inference_mode} mode. All agents will share port 8101.")
-            container = "ameva-llm-main" if inference_mode == "local_single_model" else None
-            shared_client = LLMClient("http://localhost:8101", container)
-            shared_client.auto_lifecycle = False
+            main_client = LLMClient("http://localhost:8101", "ameva-llm-main")
+            god_client = LLMClient("http://localhost:8101", "ameva-llm-god")
+            bot1_client = LLMClient("http://localhost:8101", "ameva-llm-bot-1")
+            bot2_client = LLMClient("http://localhost:8101", "ameva-llm-bot-2")
+            bot3_client = LLMClient("http://localhost:8101", "ameva-llm-bot-3")
+            
+            main_client.auto_lifecycle = False
+            god_client.auto_lifecycle = False
+            bot1_client.auto_lifecycle = False
+            bot2_client.auto_lifecycle = False
+            bot3_client.auto_lifecycle = False
+
             ctx = SessionContext(
                 inference_mode=inference_mode,
-                main_llm=shared_client,
-                god_llm=shared_client,
+                main_llm=main_client,
+                god_llm=god_client,
                 bots={
-                    "bot_1": shared_client,
-                    "bot_2": shared_client,
-                    "bot_3": shared_client
+                    "bot_1": bot1_client,
+                    "bot_2": bot2_client,
+                    "bot_3": bot3_client
                 }
             )
             
@@ -1267,7 +1283,7 @@ async def restart_session(session_id: int):
                 if not ready:
                     raise ConnectionError("Local native llama-server was not ready after restart.")
             else:
-                await shared_client.start_container()
+                await main_client.start_container()
                 
             await run_relay_phase(ctx, db, session, post, last_comment, last_speaker, start_turn_idx=max_turn_idx)
         else:

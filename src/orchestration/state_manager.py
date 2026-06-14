@@ -41,6 +41,7 @@ class OrchestratorState:
         self.llama_server_path = "llama-server"
         self.model_main = ""
         self.hardware_mode = "cpu"
+        self.active_llm = None
 
     def push_event(self, event_type: str, data: dict):
         if event_type == "ERROR":
