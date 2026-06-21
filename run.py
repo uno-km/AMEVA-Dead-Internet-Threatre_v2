@@ -1,8 +1,10 @@
 import asyncio
 import time
+import re
+from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Depends, Query
+from fastapi import FastAPI, Request, Depends, Query, Form
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -10,7 +12,8 @@ from sqlalchemy.orm import Session as DbSession
 import logging
 
 from src.db.database import init_db, get_db
-from src.db.models import Session, Post, Comment, BotState
+from src.db.models import Session, Post, Comment, BotState, Board, ActiveNode
+from sqlalchemy import func
 from src.orchestration.runner import run_session, restart_session
 from src.orchestration.state_manager import state_manager, SystemState
 
@@ -45,7 +48,15 @@ async def read_root(request: Request):
 @app.get("/api/posts")
 async def get_posts(db: DbSession = Depends(get_db)):
     posts = db.query(Post).order_by(Post.id.desc()).all()
-    return [{"id": p.id, "title": p.title, "created_at": p.created_at.strftime("%Y-%m-%d %H:%M:%S")} for p in posts]
+    return [
+        {
+            "id": p.id,
+            "board_id": p.board_id,
+            "board_seq_id": p.board_seq_id,
+            "title": p.title,
+            "created_at": p.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        } for p in posts
+    ]
 
 @app.get("/api/posts/{post_id}")
 async def get_post_detail(post_id: int, db: DbSession = Depends(get_db)):
@@ -54,9 +65,10 @@ async def get_post_detail(post_id: int, db: DbSession = Depends(get_db)):
         return {"error": "Post not found"}
         
     session_status = "UNKNOWN"
-    session_obj = db.query(Session).filter(Session.id == post.session_id).first()
-    if session_obj:
-        session_status = session_obj.status
+    if post.session_id:
+        session_obj = db.query(Session).filter(Session.id == post.session_id).first()
+        if session_obj:
+            session_status = session_obj.status
 
     comments = db.query(Comment).filter(Comment.post_id == post.id).order_by(Comment.created_at.asc()).all()
     
@@ -74,12 +86,249 @@ async def get_post_detail(post_id: int, db: DbSession = Depends(get_db)):
         
     return {
         "id": post.id,
+        "board_id": post.board_id,
+        "board_seq_id": post.board_seq_id,
         "title": post.title,
         "content": post.content,
         "session_status": session_status,
         "created_at": post.created_at.strftime("%Y-%m-%d %H:%M:%S"),
         "comments": comments_data
     }
+
+@app.get("/api/boards")
+async def get_boards(db: DbSession = Depends(get_db)):
+    boards = db.query(Board).all()
+    return [
+        {
+            "id": b.id,
+            "board_type": b.board_type,
+            "name": b.name,
+            "description": b.description,
+            "creator": b.creator,
+            "manager": b.manager,
+            "created_at": b.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        } for b in boards
+    ]
+
+@app.get("/api/boards/{board_name}/posts")
+async def get_board_posts(board_name: str, db: DbSession = Depends(get_db)):
+    board = db.query(Board).filter(Board.name == board_name).first()
+    if not board:
+        return {"error": "Board not found"}
+    posts = db.query(Post).filter(Post.board_id == board.id).order_by(Post.id.desc()).all()
+    return [
+        {
+            "id": p.id,
+            "board_seq_id": p.board_seq_id,
+            "title": p.title,
+            "created_at": p.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        } for p in posts
+    ]
+
+from pydantic import BaseModel
+class PostCreate(BaseModel):
+    title: str
+    content: str
+
+@app.post("/api/boards/{board_name}/posts")
+async def create_board_post(board_name: str, payload: PostCreate, db: DbSession = Depends(get_db)):
+    board = db.query(Board).filter(Board.name == board_name).first()
+    if not board:
+        return {"error": "Board not found"}
+    
+    max_seq = db.query(func.max(Post.board_seq_id)).filter(Post.board_id == board.id).scalar() or 0
+    new_post = Post(
+        board_id=board.id,
+        board_seq_id=max_seq + 1,
+        title=payload.title,
+        content=payload.content
+    )
+    db.add(new_post)
+    db.commit()
+    db.refresh(new_post)
+    return {
+        "success": True,
+        "id": new_post.id,
+        "board_seq_id": new_post.board_seq_id
+    }
+
+class CommentCreate(BaseModel):
+    parent_id: Optional[int] = None
+    bot_name: str
+    content: str
+    anger_score: Optional[int] = 0
+    mentioned_bot: Optional[str] = None
+
+@app.post("/api/posts/{post_id}/comments")
+async def create_comment(post_id: int, payload: CommentCreate, db: DbSession = Depends(get_db)):
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if not post:
+        return {"error": "Post not found"}
+        
+    from src.orchestration.police import validate_comment
+    is_valid, validated_content = await validate_comment(payload.bot_name, payload.content, db)
+    if not is_valid:
+        return {"error": validated_content}
+        
+    new_comment = Comment(
+        post_id=post_id,
+        parent_id=payload.parent_id,
+        bot_name=payload.bot_name,
+        content=validated_content,
+        anger_score=payload.anger_score,
+        mentioned_bot=payload.mentioned_bot
+    )
+    db.add(new_comment)
+    db.commit()
+    db.refresh(new_comment)
+    return {
+        "success": True,
+        "id": new_comment.id
+    }
+
+@app.get("/board/{board_name}", response_class=HTMLResponse)
+async def view_board(board_name: str, request: Request, db: DbSession = Depends(get_db)):
+    board = db.query(Board).filter(Board.name == board_name).first()
+    if not board:
+        return HTMLResponse(content="<h1>Board Not Found</h1>", status_code=404)
+    posts = db.query(Post).filter(Post.board_id == board.id).order_by(Post.id.desc()).all()
+    return templates.TemplateResponse(request=request, name="board.html", context={"board": board, "posts": posts})
+
+@app.get("/post/{post_id}", response_class=HTMLResponse)
+async def view_post(post_id: int, request: Request, db: DbSession = Depends(get_db)):
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if not post:
+        return HTMLResponse(content="<h1>Post Not Found</h1>", status_code=404)
+    board = db.query(Board).filter(Board.id == post.board_id).first()
+    
+    comments = db.query(Comment).filter(Comment.post_id == post.id).order_by(Comment.created_at.asc()).all()
+    
+    comment_map = {}
+    comments_tree = []
+    for c in comments:
+        comment_map[c.id] = {
+            "id": c.id,
+            "parent_id": c.parent_id,
+            "bot_name": c.bot_name,
+            "content": c.content,
+            "anger_score": c.anger_score,
+            "mentioned_bot": c.mentioned_bot,
+            "created_at": c.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "replies": []
+        }
+        
+    for c in comments:
+        mapped = comment_map[c.id]
+        if c.parent_id and c.parent_id in comment_map:
+            comment_map[c.parent_id]["replies"].append(mapped)
+        else:
+            comments_tree.append(mapped)
+            
+    return templates.TemplateResponse(request=request, name="post_detail.html", context={
+        "board": board,
+        "post": post,
+        "comments_tree": comments_tree
+    })
+
+@app.get("/notifications/{bot_name}", response_class=HTMLResponse)
+async def view_notifications(bot_name: str, request: Request, db: DbSession = Depends(get_db)):
+    mentions = db.query(Comment).filter(Comment.mentioned_bot == bot_name).order_by(Comment.created_at.desc()).limit(20).all()
+    return templates.TemplateResponse(request=request, name="notifications.html", context={
+        "bot_name": bot_name,
+        "mentions": mentions
+    })
+
+@app.post("/board/{board_name}/posts")
+async def create_board_post_form(
+    board_name: str,
+    title: str = Form(...),
+    content: str = Form(...),
+    db: DbSession = Depends(get_db)
+):
+    board = db.query(Board).filter(Board.name == board_name).first()
+    if not board:
+        return HTMLResponse(content="<h1>Board Not Found</h1>", status_code=404)
+        
+    max_seq = db.query(func.max(Post.board_seq_id)).filter(Post.board_id == board.id).scalar() or 0
+    new_post = Post(
+        board_id=board.id,
+        board_seq_id=max_seq + 1,
+        title=title,
+        content=content
+    )
+    db.add(new_post)
+    db.commit()
+    
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/board/{board_name}", status_code=303)
+
+@app.post("/post/{post_id}/comments")
+async def create_comment_form(
+    post_id: int,
+    bot_name: str = Form(...),
+    content: str = Form(...),
+    parent_id: Optional[int] = Form(None),
+    db: DbSession = Depends(get_db)
+):
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if not post:
+        return HTMLResponse(content="<h1>Post Not Found</h1>", status_code=404)
+        
+    from src.orchestration.police import validate_comment
+    is_valid, validated_content = await validate_comment(bot_name, content, db)
+    if not is_valid:
+        return HTMLResponse(content=f"<h1>Validation Failed</h1><p>{validated_content}</p><a href='/post/{post_id}'>돌아가기</a>", status_code=400)
+        
+    mentioned_bot = None
+    mention_match = re.search(r'@(bot_[123]|police)\b', validated_content, re.IGNORECASE)
+    if mention_match:
+        mentioned_bot = mention_match.group(1).lower()
+        
+    new_comment = Comment(
+        post_id=post_id,
+        parent_id=parent_id,
+        bot_name=bot_name,
+        content=validated_content,
+        mentioned_bot=mentioned_bot
+    )
+    db.add(new_comment)
+    db.commit()
+    
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/post/{post_id}", status_code=303)
+
+class HeartbeatPayload(BaseModel):
+    node_id: str
+    bot_name: str
+    status: Optional[str] = "ACTIVE"
+    hardware_mode: Optional[str] = "CPU"
+
+@app.post("/api/nodes/heartbeat")
+async def node_heartbeat(payload: HeartbeatPayload, db: DbSession = Depends(get_db)):
+    node = db.query(ActiveNode).filter(ActiveNode.node_id == payload.node_id).first()
+    if node:
+        node.bot_name = payload.bot_name
+        node.status = payload.status
+        node.hardware_mode = payload.hardware_mode
+        node.last_seen = datetime.now()
+    else:
+        node = ActiveNode(
+            node_id=payload.node_id,
+            bot_name=payload.bot_name,
+            status=payload.status,
+            hardware_mode=payload.hardware_mode,
+            last_seen=datetime.now()
+        )
+        db.add(node)
+    db.commit()
+    return {"success": True}
+
+@app.get("/api/nodes/active")
+async def get_active_nodes(db: DbSession = Depends(get_db)):
+    from datetime import timedelta
+    cutoff = datetime.now() - timedelta(seconds=30)
+    count = db.query(ActiveNode).filter(ActiveNode.last_seen >= cutoff).count()
+    return {"active_count": count}
 
 @app.get("/api/bots/state")
 async def get_bot_states(db: DbSession = Depends(get_db)):
@@ -294,11 +543,15 @@ async def get_bot_inspector_detail(
     db: DbSession = Depends(get_db)
 ):
     import json
-    from src.db.models import Session, CurrentAgentState, AgentStateSnapshot, EdgeState, InterventionLog
+    from src.db.models import Session, CurrentAgentState, AgentStateSnapshot, EdgeState, InterventionLog, BotState
 
     if session_id is None:
         latest_session = db.query(Session).order_by(Session.id.desc()).first()
         session_id = latest_session.id if latest_session else None
+
+    bot_state = db.query(BotState).filter(BotState.bot_name == bot_name).first()
+    persona = bot_state.persona if bot_state else ""
+    current_directive = bot_state.current_directive if bot_state else ""
 
     current_state = db.query(CurrentAgentState).filter(
         CurrentAgentState.session_id == session_id,
@@ -381,6 +634,8 @@ async def get_bot_inspector_detail(
     return {
         "bot_name": bot_name,
         "session_id": session_id,
+        "persona": persona,
+        "current_directive": current_directive,
         "raw_tensors": raw_tensors,
         "time_series": time_series,
         "edges": edges_data,

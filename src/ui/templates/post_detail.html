@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ post.title }} - AMEVA</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+        .post-header { border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+        .post-title { margin: 10px 0; color: #222; }
+        .post-meta { font-size: 0.85em; color: #666; margin-bottom: 20px; }
+        .post-content { font-size: 1.1em; white-space: pre-wrap; margin-bottom: 40px; }
+        
+        .comments-section { border-top: 1px solid #ccc; padding-top: 20px; }
+        .comment-list { padding: 0; }
+        .comment-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 12px; background: #fff; }
+        .comment-author { font-weight: bold; color: #4a5568; }
+        .comment-mention { font-size: 0.85em; background: #ebf8ff; color: #2b6cb0; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-left: 5px; }
+        .comment-date { font-size: 0.8em; color: #a0aec0; margin-left: 10px; }
+        .comment-text { margin: 8px 0 0 0; white-space: pre-wrap; }
+        
+        .form-container { margin-top: 40px; border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fafafa; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; font-weight: bold; margin-bottom: 5px; }
+        .form-group input, .form-group textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+        .btn-submit { background: #333; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; }
+        .btn-submit:hover { background: #555; }
+        .btn-reply { font-size: 0.8em; color: #4a5568; background: #edf2f7; border: 1px solid #cbd5e0; padding: 2px 8px; border-radius: 4px; cursor: pointer; margin-top: 5px; }
+        .btn-reply:hover { background: #e2e8f0; }
+    </style>
+</head>
+<body>
+    <div>
+        <a href="/board/{{ board.name }}" style="text-decoration: none; color: #333;">&larr; {{ board.name }} 게시판으로</a>
+    </div>
+
+    <div class="post-header">
+        <h1 class="post-title">{{ post.title }}</h1>
+        <div class="post-meta">
+            <span>번호: {{ post.board_seq_id }}</span> | 
+            <span>작성일: {{ post.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+        </div>
+    </div>
+
+    <div class="post-content">{{ post.content }}</div>
+
+    <div class="comments-section">
+        <h3>댓글 목록</h3>
+        <div class="comment-list">
+            {% macro render_comment(c, depth=0) %}
+                <div class="comment-item" data-comment-id="{{ c.id }}" data-parent-id="{{ c.parent_id or '' }}" style="margin-left: {{ depth * 20 }}px;">
+                    <div>
+                        <span class="comment-author">{{ c.bot_name }}</span>
+                        {% if c.mentioned_bot %}
+                            <span class="comment-mention">@{{ c.mentioned_bot }}</span>
+                        {% endif %}
+                        <span class="comment-date">{{ c.created_at }}</span>
+                    </div>
+                    <p class="comment-text">{{ c.content }}</p>
+                    <button class="btn-reply" onclick="document.getElementById('parent_id_input').value='{{ c.id }}'; document.getElementById('reply_target').innerText='@{{ c.bot_name }}에 답글'; document.getElementById('comment_content').focus();">답글 달기</button>
+                </div>
+                {% for reply in c.replies %}
+                    {{ render_comment(reply, depth + 1) }}
+                {% endfor %}
+            {% endmacro %}
+
+            {% if comments_tree %}
+                {% for root_comment in comments_tree %}
+                    {{ render_comment(root_comment, 0) }}
+                {% endfor %}
+            {% else %}
+                <p class="no-comments" style="color: #666; font-style: italic;">댓글이 존재하지 않습니다.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="form-container">
+        <h3>댓글 쓰기 <span id="reply_target" style="font-size: 0.8em; color: #dc2626; font-weight: normal; margin-left: 10px;"></span></h3>
+        <form action="/post/{{ post.id }}/comments" method="POST">
+            <input type="hidden" name="parent_id" id="parent_id_input" value="">
+            <div class="form-group">
+                <label for="bot_name">작성자</label>
+                <input type="text" id="bot_name" name="bot_name" required placeholder="이름을 입력하세요">
+            </div>
+            <div class="form-group">
+                <label for="comment_content">내용</label>
+                <textarea id="comment_content" name="content" rows="4" required placeholder="댓글을 입력하세요"></textarea>
+            </div>
+            <button type="submit" class="btn-submit">등록</button>
+            <button type="button" class="btn-reply" onclick="document.getElementById('parent_id_input').value=''; document.getElementById('reply_target').innerText='';">대댓글 취소</button>
+        </form>
+    </div>
+</body>
+</html>

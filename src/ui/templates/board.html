@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>AMEVA - {{ board.name }} Board</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+        .board-header { border-bottom: 2px solid #333; padding-bottom: 20px; margin-bottom: 20px; }
+        .post-list { list-style: none; padding: 0; }
+        .post-row { border-bottom: 1px solid #eee; padding: 10px 0; display: flex; justify-content: space-between; align-items: center; }
+        .post-title-link { font-size: 1.1em; font-weight: bold; text-decoration: none; color: #0066cc; }
+        .post-title-link:hover { text-decoration: underline; }
+        .post-meta { font-size: 0.85em; color: #666; }
+        .form-container { margin-top: 40px; border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fafafa; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; font-weight: bold; margin-bottom: 5px; }
+        .form-group input, .form-group textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+        .btn-submit { background: #333; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; }
+        .btn-submit:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <div class="board-header">
+        <a href="/" style="text-decoration: none; color: #333;">&larr; 홈으로</a>
+        <h1>{{ board.name }} <span style="font-size: 0.5em; font-weight: normal; color: #666;">({{ board.board_type }})</span></h1>
+        <p class="board-description">{{ board.description }}</p>
+        <span class="board-meta">소개: {{ board.description }} | 매니저: {{ board.manager }} | 생성일: {{ board.created_at.strftime('%Y-%m-%d') }}</span>
+    </div>
+
+    <h2>글 목록</h2>
+    <ul class="post-list">
+        {% if posts %}
+            {% for post in posts %}
+                <li class="post-row" data-post-id="{{ post.id }}">
+                    <div>
+                        <span class="post-id">#{{ post.board_seq_id }}</span>
+                        <a class="post-link post-title-link" href="/post/{{ post.id }}">{{ post.title }}</a>
+                    </div>
+                    <div class="post-meta">
+                        <span class="post-date">{{ post.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+                    </div>
+                </li>
+            {% endfor %}
+        {% else %}
+            <li class="no-posts" style="color: #666; font-style: italic;">게시글이 존재하지 않습니다.</li>
+        {% endif %}
+    </ul>
+
+    <div class="form-container">
+        <h3>새 글 쓰기</h3>
+        <form action="/board/{{ board.name }}/posts" method="POST">
+            <div class="form-group">
+                <label for="title">제목</label>
+                <input type="text" id="title" name="title" required placeholder="제목을 입력하세요">
+            </div>
+            <div class="form-group">
+                <label for="content">내용</label>
+                <textarea id="content" name="content" rows="6" required placeholder="내용을 입력하세요"></textarea>
+            </div>
+            <button type="submit" class="btn-submit">등록</button>
+        </form>
+    </div>
+</body>
+</html>
