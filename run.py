@@ -238,6 +238,20 @@ async def view_notifications(bot_name: str, request: Request, db: DbSession = De
         "mentions": mentions
     })
 
+@app.get("/api/notifications/{bot_name}")
+async def get_notifications_json(bot_name: str, db: DbSession = Depends(get_db)):
+    mentions = db.query(Comment).filter(Comment.mentioned_bot == bot_name).order_by(Comment.created_at.desc()).limit(20).all()
+    return [
+        {
+            "id": m.id,
+            "post_id": m.post_id,
+            "parent_id": m.parent_id,
+            "bot_name": m.bot_name,
+            "content": m.content,
+            "created_at": m.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        } for m in mentions
+    ]
+
 @app.post("/board/{board_name}/posts")
 async def create_board_post_form(
     board_name: str,
@@ -280,9 +294,15 @@ async def create_comment_form(
         return HTMLResponse(content=f"<h1>Validation Failed</h1><p>{validated_content}</p><a href='/post/{post_id}'>돌아가기</a>", status_code=400)
         
     mentioned_bot = None
-    mention_match = re.search(r'@(bot_[123]|police)\b', validated_content, re.IGNORECASE)
+    mention_match = re.search(r'@(\w+)\b', validated_content)
     if mention_match:
-        mentioned_bot = mention_match.group(1).lower()
+        candidate = mention_match.group(1).lower()
+        if candidate == 'police':
+            mentioned_bot = 'police'
+        else:
+            bot_exists = db.query(BotState).filter(func.lower(BotState.bot_name) == candidate).first()
+            if bot_exists:
+                mentioned_bot = bot_exists.bot_name
         
     new_comment = Comment(
         post_id=post_id,
@@ -302,14 +322,66 @@ class HeartbeatPayload(BaseModel):
     bot_name: str
     status: Optional[str] = "ACTIVE"
     hardware_mode: Optional[str] = "CPU"
+    current_activity: Optional[str] = "Idle"
 
 @app.post("/api/nodes/heartbeat")
 async def node_heartbeat(payload: HeartbeatPayload, db: DbSession = Depends(get_db)):
+    import json
+    from src.db.models import BotState, Session, CurrentAgentState
+    
+    # 1. Dynamic Bot State Registration if not exists
+    bot_exists = db.query(BotState).filter(BotState.bot_name == payload.bot_name).first()
+    if not bot_exists:
+        logger.info(f"[DB] Dynamically registering new bot state for {payload.bot_name}")
+        persona_text = ""
+        try:
+            with open("personas.json", "r", encoding="utf-8") as f:
+                personas = json.load(f)
+                persona_text = personas.get(payload.bot_name, "")
+        except:
+            pass
+        if not persona_text:
+            persona_text = f"당신은 인터넷 커뮤니티의 자율 에이전트 {payload.bot_name}입니다. 흥미를 유발하고 자신의 성향에 따라 솔직하게 댓글과 글을 작성하세요."
+            
+        new_bot = BotState(
+            bot_name=payload.bot_name,
+            persona=persona_text,
+            current_directive="Participate naturally in the conversation.",
+            anger_targets="{}"
+        )
+        db.add(new_bot)
+        db.commit()
+        
+        # Create CurrentAgentState for the active session
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        if latest_session:
+            cas = db.query(CurrentAgentState).filter(
+                CurrentAgentState.session_id == latest_session.id,
+                CurrentAgentState.bot_name == payload.bot_name
+            ).first()
+            if not cas:
+                cas = CurrentAgentState(
+                    session_id=latest_session.id,
+                    bot_name=payload.bot_name,
+                    traits_json=json.dumps([0.0] * 22),
+                    states_json=json.dumps([0.0] * 10),
+                    affect_json=json.dumps([0.0, 0.0]),
+                    memory_json=json.dumps([0.0] * 8),
+                    opinion_json=json.dumps([0.0, 0.0, 0.0, 0.0]),
+                    power_json=json.dumps([0.0, 0.0]),
+                    residual_json=json.dumps([0.0] * 16),
+                    event_data_json="{}"
+                )
+                db.add(cas)
+                db.commit()
+
+    # 2. Update Heartbeat
     node = db.query(ActiveNode).filter(ActiveNode.node_id == payload.node_id).first()
     if node:
         node.bot_name = payload.bot_name
         node.status = payload.status
         node.hardware_mode = payload.hardware_mode
+        node.current_activity = payload.current_activity
         node.last_seen = datetime.now()
     else:
         node = ActiveNode(
@@ -317,6 +389,7 @@ async def node_heartbeat(payload: HeartbeatPayload, db: DbSession = Depends(get_
             bot_name=payload.bot_name,
             status=payload.status,
             hardware_mode=payload.hardware_mode,
+            current_activity=payload.current_activity,
             last_seen=datetime.now()
         )
         db.add(node)
@@ -330,7 +403,16 @@ async def get_active_nodes(db: DbSession = Depends(get_db)):
     active_nodes = db.query(ActiveNode).filter(ActiveNode.last_seen >= cutoff).all()
     return {
         "active_count": len(active_nodes),
-        "nodes": [{"bot_name": n.bot_name, "hardware_mode": n.hardware_mode} for n in active_nodes]
+        "nodes": [
+            {
+                "node_id": n.node_id,
+                "bot_name": n.bot_name,
+                "status": "Online",
+                "current_activity": n.current_activity or "Idle",
+                "hardware_mode": n.hardware_mode,
+                "last_seen": n.last_seen.strftime("%H:%M:%S")
+            } for n in active_nodes
+        ]
     }
 
 @app.get("/api/comments/recent")

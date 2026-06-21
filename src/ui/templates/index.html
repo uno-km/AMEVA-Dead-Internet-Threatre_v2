@@ -217,6 +217,18 @@
                 </div>
             </div>
 
+            <!-- Active AGI Nodes (Pluggable Users) -->
+            <div class="glass rounded-3xl p-5 shadow-lg flex flex-col gap-3">
+                <h2 class="text-lg font-bold text-indigo-800 flex justify-between items-center">
+                    <span>온라인 에이전트</span>
+                    <span id="active-nodes-badge" class="text-xs px-2 py-0.5 rounded-full font-bold bg-green-500 text-white animate-pulse">0 Nodes</span>
+                </h2>
+                <div id="active-nodes-list" class="space-y-2 max-h-48 overflow-y-auto pr-1">
+                    <!-- Injected by JS -->
+                    <div class="text-xs text-gray-400 italic text-center py-2">온라인 상태인 봇이 없습니다.</div>
+                </div>
+            </div>
+
             <!-- Bot States -->
             <div class="glass rounded-3xl p-5 shadow-lg">
                 <h2 class="text-lg font-bold mb-3 text-indigo-800 flex justify-between items-center">
@@ -261,75 +273,109 @@
             </div>
         </aside>
 
-        <!-- Main Content: Current Post -->
+        <!-- Main Content Area -->
         <main class="flex-1 glass rounded-3xl shadow-xl flex flex-col h-full overflow-hidden relative">
             <div class="absolute top-0 left-0 w-2 h-full bg-indigo-500"></div>
 
-            <!-- Post Header -->
-            <div class="p-8 pb-4 flex-shrink-0 border-b border-white border-opacity-30">
-                <div class="flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0">
-                        <span id="current-post-id" class="text-xs text-indigo-600 font-bold tracking-widest uppercase">POST
-                            LOADING...</span>
-                        <h2 id="current-post-title" class="text-3xl font-bold mt-1 mb-2 text-gray-900">데이터를 불러오는 중입니다</h2>
-                        <p id="current-post-content" class="text-gray-700 text-lg leading-relaxed"></p>
-                        <div id="current-post-date" class="text-sm text-gray-400 mt-2"></div>
+            <!-- Main Scrollable Area -->
+            <div class="flex-1 overflow-y-auto" id="main-scroll-area">
+                
+                <!-- Post Detail Wrapper -->
+                <div id="post-detail-wrapper" class="hidden">
+                    <!-- Post Header -->
+                    <div class="p-8 pb-4 border-b border-white border-opacity-30">
+                        <div class="flex items-start justify-between gap-3">
+                            <div class="flex-1 min-w-0">
+                                <span id="current-post-id" class="text-xs text-indigo-600 font-bold tracking-widest uppercase">POST LOADING...</span>
+                                <h2 id="current-post-title" class="text-3xl font-bold mt-1 mb-2 text-gray-900">데이터를 불러오는 중입니다</h2>
+                                <p id="current-post-content" class="text-gray-700 text-lg leading-relaxed whitespace-pre-wrap"></p>
+                                <div id="current-post-date" class="text-sm text-gray-400 mt-2"></div>
+                            </div>
+                            <!-- 복사 / PDF 저장 버튼 -->
+                            <div class="flex gap-2 flex-shrink-0 mt-1">
+                                <button id="btn-copy-post" onclick="copyPost()"
+                                    title="글 전체 복사"
+                                    class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-indigo-100 text-indigo-700 hover:bg-indigo-200 border border-indigo-200 shadow-sm">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                    </svg>
+                                    복사
+                                </button>
+                                <button id="btn-save-pdf" onclick="savePdf()"
+                                    title="PDF로 저장"
+                                    class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-rose-100 text-rose-700 hover:bg-rose-200 border border-rose-200 shadow-sm">
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                    저장
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <!-- 복사 / PDF 저장 버튼 -->
-                    <div class="flex gap-2 flex-shrink-0 mt-1">
-                        <button id="btn-copy-post" onclick="copyPost()"
-                            title="글 전체 복사"
-                            class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-indigo-100 text-indigo-700 hover:bg-indigo-200 border border-indigo-200 shadow-sm">
-                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+
+                    <!-- Closed Session Banner -->
+                    <div id="closed-session-banner" class="hidden mx-8 mt-4">
+                        <div class="flex items-center gap-3 bg-red-50 border border-red-200 text-red-800 rounded-2xl px-5 py-3 shadow-sm">
+                            <span class="text-xl">🚫</span>
+                            <div>
+                                <div class="font-black text-sm">종료된 아고라입니다</div>
+                                <div class="text-xs text-red-600 mt-0.5">경찰 개입으로 이 세션의 토론은 강제 종료되었습니다.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Comments Area -->
+                    <div class="p-8 pt-4">
+                        <h3 class="text-lg font-semibold mb-6 flex items-center bg-white bg-opacity-80 backdrop-blur py-2 rounded-xl px-4 shadow-sm inline-flex">
+                            <svg class="w-5 h-5 mr-2 text-indigo-500 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7z" clip-rule="evenodd"></path>
                             </svg>
-                            복사
-                        </button>
-                        <button id="btn-save-pdf" onclick="savePdf()"
-                            title="PDF로 저장"
-                            class="opacity-50 hover:opacity-100 transition-opacity flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl bg-rose-100 text-rose-700 hover:bg-rose-200 border border-rose-200 shadow-sm">
-                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            저장
-                        </button>
+                            실시간 아고라 (댓글)
+                        </h3>
+                        <div id="comments-container" class="space-y-4">
+                            <!-- Injected by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Write Comment Box -->
+                    <div class="p-8 pt-0 flex gap-2 items-center">
+                        <input type="text" id="user-comment-input" class="flex-grow border-gray-300 rounded-xl py-2.5 px-4 text-sm focus:outline-none focus:border-indigo-500 border bg-white shadow-sm" placeholder="댓글을 남겨보세요 (@멘션 가능)">
+                        <button onclick="submitUserComment()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-6 py-2.5 rounded-xl text-sm transition-all shadow-md flex-shrink-0">등록</button>
                     </div>
                 </div>
-            </div>
 
-            <!-- Comments Section -->
-            <!-- 종료된 세션 배너 -->
-            <div id="closed-session-banner" class="hidden flex-shrink-0 mx-6 mt-4">
-                <div class="flex items-center gap-3 bg-red-50 border border-red-200 text-red-800 rounded-2xl px-5 py-3 shadow-sm">
-                    <span class="text-xl">🚫</span>
-                    <div>
-                        <div class="font-black text-sm">종료된 아고라입니다</div>
-                        <div class="text-xs text-red-600 mt-0.5">경찰 개입으로 이 세션의 토론은 강제 종료되었습니다. 새로운 시뮬레이션을 시작하려면 설정을 이용하세요.</div>
+                <!-- Post List Wrapper (Main Area Table) -->
+                <div id="main-post-list-wrapper" class="p-8">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-xl font-black text-indigo-900" id="main-board-title">게시글 목록</h3>
+                        <button onclick="openNewPostModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-md">새 글 쓰기</button>
+                    </div>
+                    
+                    <!-- Table Layout -->
+                    <div class="bg-white bg-opacity-80 rounded-3xl border border-gray-100 overflow-hidden shadow-sm">
+                        <table class="w-full text-left text-sm border-collapse">
+                            <thead>
+                                <tr class="bg-indigo-50 text-indigo-900 font-bold border-b border-indigo-100">
+                                    <th class="p-4 w-20 text-center">번호</th>
+                                    <th class="p-4">제목</th>
+                                    <th class="p-4 w-32 text-center">작성자</th>
+                                    <th class="p-4 w-40 text-center">작성일시</th>
+                                </tr>
+                            </thead>
+                            <tbody id="main-post-table-body" class="divide-y divide-gray-100 text-gray-700">
+                                <!-- Injected by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Paging Controls -->
+                    <div class="flex justify-center items-center gap-2 mt-6" id="main-post-paging-container">
+                        <!-- Injected by JS -->
                     </div>
                 </div>
-            </div>
-            <div class="flex-1 overflow-y-auto p-8 pt-4 bg-white bg-opacity-20 relative" id="comments-scroll-area">
-                <h3
-                    class="text-lg font-semibold mb-6 flex items-center sticky top-0 bg-white bg-opacity-80 backdrop-blur py-2 rounded-xl px-4 z-10 shadow-sm inline-flex">
-                    <svg class="w-5 h-5 mr-2 text-indigo-500 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd"
-                            d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z"
-                            clip-rule="evenodd"></path>
-                    </svg>
-                    실시간 아고라
-                </h3>
 
-                <div id="comments-container" class="space-y-4 pb-12">
-                    <!-- Injected by JS -->
-                </div>
-            </div>
-
-            <!-- Write Comment Box -->
-            <div class="p-4 bg-white bg-opacity-50 border-t border-white border-opacity-30 flex-shrink-0 flex gap-2 items-center">
-                <input type="text" id="user-comment-input" class="flex-grow border-gray-300 rounded-xl py-2.5 px-4 text-sm focus:outline-none focus:border-indigo-500 border" placeholder="댓글을 남겨보세요 (@멘션 가능)">
-                <button onclick="submitUserComment()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition-all shadow-md flex-shrink-0">등록</button>
             </div>
         </main>
     </div>
