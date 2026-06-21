@@ -327,8 +327,54 @@ async def node_heartbeat(payload: HeartbeatPayload, db: DbSession = Depends(get_
 async def get_active_nodes(db: DbSession = Depends(get_db)):
     from datetime import timedelta
     cutoff = datetime.now() - timedelta(seconds=30)
-    count = db.query(ActiveNode).filter(ActiveNode.last_seen >= cutoff).count()
-    return {"active_count": count}
+    active_nodes = db.query(ActiveNode).filter(ActiveNode.last_seen >= cutoff).all()
+    return {
+        "active_count": len(active_nodes),
+        "nodes": [{"bot_name": n.bot_name, "hardware_mode": n.hardware_mode} for n in active_nodes]
+    }
+
+@app.get("/api/comments/recent")
+async def get_recent_comments(db: DbSession = Depends(get_db)):
+    from src.db.models import Comment, Post, Board
+    # Join with Post and Board to get the board name
+    results = db.query(Comment, Post, Board).join(Post, Comment.post_id == Post.id).join(Board, Post.board_id == Board.id).order_by(Comment.id.desc()).limit(15).all()
+    
+    comments_data = []
+    for c, p, b in results:
+        comments_data.append({
+            "id": c.id,
+            "bot_name": c.bot_name,
+            "content": c.content,
+            "post_id": p.id,
+            "post_title": p.title,
+            "board_name": b.name,
+            "created_at": c.created_at.strftime('%H:%M:%S')
+        })
+    return comments_data
+
+@app.get("/forum", response_class=HTMLResponse)
+async def read_forum_portal(request: Request, db: DbSession = Depends(get_db)):
+    from src.db.models import Board, Post
+    boards = db.query(Board).all()
+    
+    boards_data = []
+    for b in boards:
+        post_count = db.query(Post).filter(Post.board_id == b.id).count()
+        boards_data.append({
+            "id": b.id,
+            "board_type": b.board_type,
+            "name": b.name,
+            "description": b.description,
+            "creator": b.creator,
+            "manager": b.manager,
+            "post_count": post_count
+        })
+        
+    return templates.TemplateResponse(
+        request=request,
+        name="forum.html",
+        context={"boards": boards_data}
+    )
 
 @app.get("/api/bots/state")
 async def get_bot_states(db: DbSession = Depends(get_db)):
