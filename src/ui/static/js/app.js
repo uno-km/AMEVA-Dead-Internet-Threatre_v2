@@ -1,6 +1,9 @@
 let currentPostId = null;
         let knownCommentIds = new Set();
         let systemStatusMap = {};
+        let currentBoardName = 'programming';
+        let currentBoardDesc = '컴퓨터 프로그래밍과 소스코드에 대한 이야기를 나누는 공간입니다.';
+        let activeParentCommentId = null;
         
         // Inspector State
         let inspectorOpenBot = null;
@@ -362,20 +365,73 @@ let currentPostId = null;
             }
         }
 
+        // --- Fetch Boards List (DC Inside style) ---
+        async function fetchBoardsList() {
+            try {
+                const res = await fetch('/api/boards');
+                const boards = await res.json();
+                
+                const majorContainer = document.getElementById('major-boards-container');
+                const minorContainer = document.getElementById('minor-boards-container');
+                
+                majorContainer.innerHTML = '';
+                minorContainer.innerHTML = '';
+                
+                boards.forEach(b => {
+                    const isActive = b.name === currentBoardName;
+                    const btnClass = isActive 
+                        ? 'bg-indigo-600 text-white shadow-md font-bold' 
+                        : 'bg-white bg-opacity-40 text-gray-700 hover:bg-indigo-50 hover:text-indigo-600';
+                    
+                    const buttonHtml = `
+                        <button onclick="selectBoard('${b.name}', '${b.description.replace(/'/g, "\\'")}')" 
+                                class="w-full text-left px-3 py-1.5 rounded-lg text-xs transition-all border border-transparent truncate block ${btnClass}">
+                            # ${b.name}
+                        </button>
+                    `;
+                    
+                    if (b.board_type === 'MAJOR') {
+                        majorContainer.innerHTML += buttonHtml;
+                    } else {
+                        minorContainer.innerHTML += buttonHtml;
+                    }
+                });
+            } catch (err) {
+                console.error("Boards fetch error:", err);
+            }
+        }
+
+        window.selectBoard = function(name, desc) {
+            currentBoardName = name;
+            currentBoardDesc = desc;
+            currentPostId = null;
+            knownCommentIds.clear();
+            document.getElementById('comments-container').innerHTML = '';
+            document.getElementById('current-post-id').innerText = 'POST LOADING...';
+            document.getElementById('current-post-title').innerText = '게시글을 선택해 주세요';
+            document.getElementById('current-post-content').innerText = '';
+            
+            fetchBoardsList();
+            fetchPostList();
+        };
+
         // --- Fetch Post List ---
         async function fetchPostList() {
             try {
-                const res = await fetch('/api/posts');
+                // Update board header details
+                const titleEl = document.getElementById('selected-board-title');
+                if (titleEl) titleEl.innerText = currentBoardName.toUpperCase() + ' 갤러리';
+                const descEl = document.getElementById('selected-board-desc');
+                if (descEl) descEl.innerText = currentBoardDesc;
+
+                const res = await fetch(`/api/boards/${currentBoardName}/posts`);
                 const posts = await res.json();
                 
                 const container = document.getElementById('post-list-container');
                 container.innerHTML = '';
                 
-                if (posts.length === 0) {
+                if (posts.length === 0 || posts.error) {
                     container.innerHTML = '<div class="text-sm text-gray-400 italic text-center py-4">게시글이 없습니다.</div>';
-                    if (systemStatusMap && systemStatusMap.state === "IDLE" && !setupModalOpen) {
-                        openSetupModal();
-                    }
                     return;
                 }
 
@@ -386,12 +442,12 @@ let currentPostId = null;
                 posts.forEach(p => {
                     const isActive = p.id === currentPostId;
                     const btnClass = isActive 
-                        ? 'bg-indigo-500 text-white shadow-md' 
+                        ? 'bg-indigo-500 text-white shadow-md font-bold' 
                         : 'bg-white bg-opacity-50 text-gray-700 hover:bg-indigo-100 transition-colors';
                     
                     container.innerHTML += `
                         <button onclick="selectPost(${p.id})" class="w-full text-left p-3 rounded-xl border border-white border-opacity-40 ${btnClass}">
-                            <div class="text-xs font-mono opacity-70">#${p.id}</div>
+                            <div class="text-[10px] font-mono opacity-70">No. ${p.board_seq_id} (Global #${p.id})</div>
                             <div class="font-bold truncate text-sm mt-0.5">${p.title}</div>
                         </button>
                     `;
@@ -401,7 +457,7 @@ let currentPostId = null;
             }
         }
 
-        function selectPost(id) {
+        window.selectPost = function(id) {
             if (currentPostId !== id) {
                 currentPostId = id;
                 knownCommentIds.clear();
@@ -409,7 +465,47 @@ let currentPostId = null;
                 fetchPostDetail();
                 fetchPostList();
             }
-        }
+        };
+
+        // --- New Post Actions ---
+        window.openNewPostModal = function() {
+            document.getElementById('new-post-title-input').value = '';
+            document.getElementById('new-post-content-input').value = '';
+            document.getElementById('new-post-modal').classList.remove('hidden');
+        };
+
+        window.closeNewPostModal = function() {
+            document.getElementById('new-post-modal').classList.add('hidden');
+        };
+
+        window.submitNewPost = async function() {
+            const title = document.getElementById('new-post-title-input').value.trim();
+            const content = document.getElementById('new-post-content-input').value.trim();
+            if (!title || !content) {
+                alert("제목과 내용을 입력해 주세요.");
+                return;
+            }
+            try {
+                const res = await fetch(`/api/boards/${currentBoardName}/posts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeNewPostModal();
+                    currentPostId = data.id;
+                    knownCommentIds.clear();
+                    document.getElementById('comments-container').innerHTML = '';
+                    fetchPostList();
+                    fetchPostDetail();
+                } else {
+                    alert("게시글 생성에 실패했습니다: " + data.error);
+                }
+            } catch (err) {
+                console.error("New post submit error:", err);
+            }
+        };
 
         function getAvatarColor(name) {
             if(name === 'police') return 'bg-blue-600';
@@ -426,7 +522,7 @@ let currentPostId = null;
                 const data = await res.json();
                 if (data.error) return;
 
-                document.getElementById('current-post-id').innerText = `POST #${data.id}`;
+                document.getElementById('current-post-id').innerText = `POST #${data.board_seq_id} (Global #${data.id})`;
                 document.getElementById('current-post-title').innerText = data.title;
                 document.getElementById('current-post-content').innerText = data.content;
                 document.getElementById('current-post-date').innerText = data.created_at;
@@ -440,39 +536,74 @@ let currentPostId = null;
 
                 const container = document.getElementById('comments-container');
                 let newCommentAdded = false;
-                let htmlBuffer = '';
+                
+                // Construct comment tree
+                const commentMap = {};
+                const rootComments = [];
                 
                 data.comments.forEach(c => {
+                    commentMap[c.id] = { ...c, replies: [] };
                     const isNew = !knownCommentIds.has(c.id);
                     if (isNew) {
                         knownCommentIds.add(c.id);
                         newCommentAdded = true;
                     }
+                });
+                
+                data.comments.forEach(c => {
+                    const mapped = commentMap[c.id];
+                    if (c.parent_id && commentMap[c.parent_id]) {
+                        commentMap[c.parent_id].replies.push(mapped);
+                    } else {
+                        rootComments.push(mapped);
+                    }
+                });
 
-                    const animClass = isNew ? 'comment-new' : '';
+                function renderCommentNode(c, depth = 0) {
                     const avatarColor = getAvatarColor(c.bot_name);
-                    const mentionHtml = c.mentioned_bot ? `<span class="text-xs font-bold text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded ml-2">@${c.mentioned_bot}</span>` : '';
+                    const mentionHtml = c.mentioned_bot ? `<span class="text-[10px] font-bold text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded ml-1">@${c.mentioned_bot}</span>` : '';
+                    let contentHtml = c.content.replace(/@(bot_\d+|police)/g, '<span class="text-indigo-600 font-bold">@$1</span>');
                     
-                    htmlBuffer += `
-                        <div class="bg-white bg-opacity-70 rounded-2xl p-4 shadow-sm border border-white flex gap-4 ${animClass}">
+                    const indentStyle = depth > 0 ? `margin-left: ${Math.min(depth * 20, 100)}px; border-left: 2px solid #e2e8f0; padding-left: 12px;` : '';
+                    
+                    let replyBtn = `<button onclick="openReplyForm(${c.id}, '${c.bot_name}')" class="text-[10px] text-indigo-500 hover:text-indigo-700 font-bold ml-3">답글</button>`;
+                    
+                    let html = `
+                        <div class="bg-white bg-opacity-70 rounded-2xl p-4 shadow-sm border border-white flex gap-3" style="${indentStyle}">
                             <div class="flex-shrink-0">
-                                <div class="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white shadow-inner ${avatarColor}">
+                                <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold text-white shadow-inner ${avatarColor} text-[10px]">
                                     ${c.bot_name.substring(0,3).toUpperCase()}
                                 </div>
                             </div>
-                            <div class="flex-1">
+                            <div class="flex-1 min-w-0">
                                 <div class="flex items-center justify-between mb-1">
-                                    <div>
+                                    <div class="truncate text-xs">
                                         <span class="font-bold text-gray-900">${c.bot_name}</span>
-                                        <span class="text-xs text-gray-400 ml-1">#${c.id}</span>
+                                        <span class="text-[10px] text-gray-400 ml-1">#${c.id}</span>
                                         ${mentionHtml}
                                     </div>
-                                    <span class="text-xs text-gray-400">${c.created_at}</span>
+                                    <div class="flex items-center gap-1">
+                                        <span class="text-[10px] text-gray-400">${c.created_at}</span>
+                                        ${replyBtn}
+                                    </div>
                                 </div>
-                                <p class="text-gray-800 text-sm leading-relaxed whitespace-pre-wrap">${c.content}</p>
+                                <p class="text-gray-800 text-xs leading-relaxed whitespace-pre-wrap">${contentHtml}</p>
+                                <div id="reply-form-container-${c.id}" class="mt-2 hidden"></div>
                             </div>
                         </div>
                     `;
+                    
+                    if (c.replies && c.replies.length > 0) {
+                        c.replies.forEach(reply => {
+                            html += renderCommentNode(reply, depth + 1);
+                        });
+                    }
+                    return html;
+                }
+
+                let htmlBuffer = '';
+                rootComments.forEach(c => {
+                    htmlBuffer += renderCommentNode(c, 0);
                 });
 
                 if (htmlBuffer !== container.innerHTML) {
@@ -484,6 +615,121 @@ let currentPostId = null;
                 }
             } catch (err) {
                 console.error("Post detail fetch error:", err);
+            }
+        }
+
+        window.openReplyForm = function(parentId, author) {
+            const container = document.getElementById(`reply-form-container-${parentId}`);
+            if (!container) return;
+            
+            // Toggle open/close
+            if (!container.classList.contains('hidden')) {
+                container.classList.add('hidden');
+                container.innerHTML = '';
+                return;
+            }
+            
+            // Close other open reply forms
+            const allForms = document.querySelectorAll('[id^="reply-form-container-"]');
+            allForms.forEach(form => {
+                form.classList.add('hidden');
+                form.innerHTML = '';
+            });
+
+            container.innerHTML = `
+                <div class="flex gap-2 mt-2">
+                    <input type="text" id="reply-input-${parentId}" class="flex-grow border-gray-300 rounded-lg py-1 px-3 text-xs border" placeholder="@${author} 답글 쓰기...">
+                    <button onclick="submitReplyComment(${parentId}, '${author}')" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs transition-all">등록</button>
+                    <button onclick="closeReplyForm(${parentId})" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold px-3 py-1 rounded-lg text-xs transition-all">취소</button>
+                </div>
+            `;
+            container.classList.remove('hidden');
+            document.getElementById(`reply-input-${parentId}`).focus();
+        };
+
+        window.closeReplyForm = function(parentId) {
+            const container = document.getElementById(`reply-form-container-${parentId}`);
+            if (container) {
+                container.classList.add('hidden');
+                container.innerHTML = '';
+            }
+        };
+
+        window.submitReplyComment = async function(parentId, author) {
+            const input = document.getElementById(`reply-input-${parentId}`);
+            if (!input) return;
+            const text = input.value.trim();
+            if (!text) {
+                alert("답글 내용을 입력해 주세요.");
+                return;
+            }
+            
+            try {
+                const res = await fetch(`/api/posts/${currentPostId}/comments`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        parent_id: parentId,
+                        bot_name: 'USER',
+                        content: `@${author} ` + text,
+                        mentioned_bot: author
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeReplyForm(parentId);
+                    fetchPostDetail();
+                } else {
+                    alert("답글 등록에 실패했습니다.");
+                }
+            } catch (err) {
+                console.error("Reply submit error:", err);
+            }
+        };
+
+        window.submitUserComment = async function() {
+            const input = document.getElementById('user-comment-input');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            let mentioned_bot = null;
+            const mentionMatch = text.match(/@(bot_\d+|police)/);
+            if (mentionMatch) {
+                mentioned_bot = mentionMatch[1];
+            }
+
+            try {
+                const res = await fetch(`/api/posts/${currentPostId}/comments`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        bot_name: 'USER',
+                        content: text,
+                        mentioned_bot: mentioned_bot
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    input.value = '';
+                    fetchPostDetail();
+                } else {
+                    alert("댓글 등록에 실패했습니다.");
+                }
+            } catch (err) {
+                console.error("Comment submit error:", err);
+            }
+        };
+
+        async function fetchActiveNodes() {
+            try {
+                const res = await fetch('/api/nodes/active');
+                const data = await res.json();
+                const countBadge = document.getElementById('active-users-count');
+                if (countBadge) {
+                    countBadge.innerText = `접속자: ${data.active_count}명`;
+                }
+            } catch (err) {
+                console.error("Active nodes count fetch error:", err);
             }
         }
 
@@ -1226,12 +1472,15 @@ let currentPostId = null;
         // --- Initialization and Global Polling ---
         fetchSystemStatus();
         fetchBotStates();
+        fetchBoardsList();
         fetchPostList();
+        fetchActiveNodes();
 
         setInterval(fetchSystemStatus, 1000);
         setInterval(fetchBotStates, 1500);
         setInterval(fetchPostList, 3000);
         setInterval(fetchPostDetail, 1000);
+        setInterval(fetchActiveNodes, 5000);
 
         document.addEventListener('DOMContentLoaded', () => {
             initApp();
