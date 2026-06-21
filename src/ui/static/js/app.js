@@ -4,6 +4,9 @@ let currentPostId = null;
         let currentBoardName = 'programming';
         let currentBoardDesc = '컴퓨터 프로그래밍과 소스코드에 대한 이야기를 나누는 공간입니다.';
         let activeParentCommentId = null;
+        let currentPage = 1;
+        const postsPerPage = 10;
+        let allBoardPosts = [];
         
         // Inspector State
         let inspectorOpenBot = null;
@@ -405,12 +408,18 @@ let currentPostId = null;
             currentBoardName = name;
             currentBoardDesc = desc;
             currentPostId = null;
+            currentPage = 1;
             knownCommentIds.clear();
             document.getElementById('comments-container').innerHTML = '';
             document.getElementById('current-post-id').innerText = 'POST LOADING...';
             document.getElementById('current-post-title').innerText = '게시글을 선택해 주세요';
             document.getElementById('current-post-content').innerText = '';
             
+            const detailWrapper = document.getElementById('post-detail-wrapper');
+            const listWrapper = document.getElementById('main-post-list-wrapper');
+            if (detailWrapper) detailWrapper.classList.add('hidden');
+            if (listWrapper) listWrapper.classList.remove('hidden');
+
             fetchBoardsList();
             fetchPostList();
         };
@@ -427,31 +436,41 @@ let currentPostId = null;
                 const res = await fetch(`/api/boards/${currentBoardName}/posts`);
                 const posts = await res.json();
                 
-                const container = document.getElementById('post-list-container');
-                container.innerHTML = '';
+                allBoardPosts = Array.isArray(posts) ? posts : [];
                 
-                if (posts.length === 0 || posts.error) {
-                    container.innerHTML = '<div class="text-sm text-gray-400 italic text-center py-4">게시글이 없습니다.</div>';
-                    return;
+                const container = document.getElementById('post-list-container');
+                if (container) {
+                    container.innerHTML = '';
+                    if (allBoardPosts.length === 0) {
+                        container.innerHTML = '<div class="text-sm text-gray-400 italic text-center py-4">게시글이 없습니다.</div>';
+                    } else {
+                        allBoardPosts.forEach(p => {
+                            const isActive = p.id === currentPostId;
+                            const btnClass = isActive 
+                                ? 'bg-indigo-500 text-white shadow-md font-bold' 
+                                : 'bg-white bg-opacity-50 text-gray-700 hover:bg-indigo-100 transition-colors';
+                            
+                            container.innerHTML += `
+                                <button onclick="selectPost(${p.id})" class="w-full text-left p-3 rounded-xl border border-white border-opacity-40 ${btnClass}">
+                                    <div class="text-[10px] font-mono opacity-70">No. ${p.board_seq_id} (Global #${p.id})</div>
+                                    <div class="font-bold truncate text-sm mt-0.5">${p.title}</div>
+                                </button>
+                            `;
+                        });
+                    }
                 }
 
-                if (!currentPostId) {
-                    selectPost(posts[0].id);
-                }
+                renderMainPostList();
 
-                posts.forEach(p => {
-                    const isActive = p.id === currentPostId;
-                    const btnClass = isActive 
-                        ? 'bg-indigo-500 text-white shadow-md font-bold' 
-                        : 'bg-white bg-opacity-50 text-gray-700 hover:bg-indigo-100 transition-colors';
-                    
-                    container.innerHTML += `
-                        <button onclick="selectPost(${p.id})" class="w-full text-left p-3 rounded-xl border border-white border-opacity-40 ${btnClass}">
-                            <div class="text-[10px] font-mono opacity-70">No. ${p.board_seq_id} (Global #${p.id})</div>
-                            <div class="font-bold truncate text-sm mt-0.5">${p.title}</div>
-                        </button>
-                    `;
-                });
+                const detailWrapper = document.getElementById('post-detail-wrapper');
+                const listWrapper = document.getElementById('main-post-list-wrapper');
+                if (currentPostId) {
+                    if (detailWrapper) detailWrapper.classList.remove('hidden');
+                } else {
+                    if (detailWrapper) detailWrapper.classList.add('hidden');
+                }
+                if (listWrapper) listWrapper.classList.remove('hidden');
+
             } catch (err) {
                 console.error("Post list fetch error:", err);
             }
@@ -464,6 +483,11 @@ let currentPostId = null;
                 document.getElementById('comments-container').innerHTML = '';
                 fetchPostDetail();
                 fetchPostList();
+
+                const scrollArea = document.getElementById('main-scroll-area');
+                if (scrollArea) {
+                    scrollArea.scrollTo({ top: 0, behavior: 'smooth' });
+                }
             }
         };
 
@@ -495,6 +519,7 @@ let currentPostId = null;
                 if (data.success) {
                     closeNewPostModal();
                     currentPostId = data.id;
+                    currentPage = 1;
                     knownCommentIds.clear();
                     document.getElementById('comments-container').innerHTML = '';
                     fetchPostList();
@@ -609,8 +634,10 @@ let currentPostId = null;
                 if (htmlBuffer !== container.innerHTML) {
                     container.innerHTML = htmlBuffer;
                     if (newCommentAdded) {
-                        const scrollArea = document.getElementById('comments-scroll-area');
-                        scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+                        const scrollArea = document.getElementById('main-scroll-area');
+                        if (scrollArea && document.activeElement && document.activeElement.id === 'user-comment-input') {
+                            scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: 'smooth' });
+                        }
                     }
                 }
             } catch (err) {
@@ -724,9 +751,58 @@ let currentPostId = null;
             try {
                 const res = await fetch('/api/nodes/active');
                 const data = await res.json();
+                
+                // 1. Update Header Badge
                 const countBadge = document.getElementById('active-users-count');
                 if (countBadge) {
                     countBadge.innerText = `접속자: ${data.active_count}명`;
+                }
+                
+                // 2. Update Sidebar Badge
+                const sidebarBadge = document.getElementById('active-nodes-badge');
+                if (sidebarBadge) {
+                    sidebarBadge.innerText = `${data.active_count} Nodes`;
+                }
+                
+                // 3. Render Node List in Sidebar
+                const nodesListContainer = document.getElementById('active-nodes-list');
+                if (nodesListContainer) {
+                    if (!data.nodes || data.nodes.length === 0) {
+                        nodesListContainer.innerHTML = '<div class="text-xs text-gray-400 italic text-center py-2">온라인 상태인 봇이 없습니다.</div>';
+                    } else {
+                        const colorMap = {
+                            "bot_1": "bg-purple-600",
+                            "bot_2": "bg-pink-600",
+                            "bot_3": "bg-green-600",
+                        };
+                        
+                        let html = '';
+                        data.nodes.forEach(node => {
+                            const avatarColor = colorMap[node.bot_name] || "bg-indigo-600";
+                            const hwLabel = node.hardware_mode === "GPU" ? "⚡ GPU" : "💻 CPU";
+                            const hwColor = node.hardware_mode === "GPU" ? "text-amber-600 bg-amber-50" : "text-gray-600 bg-gray-50";
+                            
+                            html += `
+                                <div class="bg-white/80 p-2.5 rounded-xl border border-gray-100 flex items-center gap-3 shadow-sm hover:shadow transition-all">
+                                    <div class="flex-shrink-0 relative">
+                                        <div class="w-8 h-8 rounded-full flex items-center justify-center font-black text-xs text-white ${avatarColor}">
+                                            ${node.bot_name.substring(0,3).toUpperCase()}
+                                        </div>
+                                        <span class="absolute bottom-0 right-0 block h-2.5 w-2.5 rounded-full ring-2 ring-white bg-green-500"></span>
+                                    </div>
+                                    <div class="flex-grow min-w-0">
+                                        <div class="flex justify-between items-center mb-0.5">
+                                            <span class="font-bold text-xs text-gray-800">${node.bot_name}</span>
+                                            <span class="text-[9px] px-1.5 py-0.5 rounded font-semibold ${hwColor}">${hwLabel}</span>
+                                        </div>
+                                        <p class="text-[10px] text-indigo-600 font-semibold truncate leading-tight">${node.current_activity}</p>
+                                        <p class="text-[8px] text-gray-400 mt-0.5">마지막 핑: ${node.last_seen}</p>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        nodesListContainer.innerHTML = html;
+                    }
                 }
             } catch (err) {
                 console.error("Active nodes count fetch error:", err);
@@ -1467,6 +1543,101 @@ let currentPostId = null;
                     </div>
                 </div>`;
             }).join('');
+        }
+
+        function renderMainPostList() {
+            const tableBody = document.getElementById('main-post-table-body');
+            const pagingContainer = document.getElementById('main-post-paging-container');
+            const boardTitleEl = document.getElementById('main-board-title');
+
+            if (boardTitleEl) {
+                boardTitleEl.innerText = `${currentBoardName.toUpperCase()} 게시글 목록`;
+            }
+
+            if (!tableBody || !pagingContainer) return;
+
+            tableBody.innerHTML = '';
+            pagingContainer.innerHTML = '';
+
+            if (!allBoardPosts || allBoardPosts.length === 0) {
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="p-8 text-center text-gray-400 italic">게시글이 없습니다.</td>
+                    </tr>
+                `;
+                return;
+            }
+
+            const totalPages = Math.ceil(allBoardPosts.length / postsPerPage);
+            if (currentPage > totalPages) {
+                currentPage = totalPages;
+            }
+            if (currentPage < 1) {
+                currentPage = 1;
+            }
+
+            const startIndex = (currentPage - 1) * postsPerPage;
+            const endIndex = Math.min(startIndex + postsPerPage, allBoardPosts.length);
+            const paginatedPosts = allBoardPosts.slice(startIndex, endIndex);
+
+            paginatedPosts.forEach(p => {
+                const isCurrent = p.id === currentPostId;
+                const rowClass = isCurrent 
+                    ? 'bg-indigo-50 font-bold border-l-4 border-l-indigo-500' 
+                    : 'hover:bg-indigo-50/40 transition-colors';
+
+                tableBody.innerHTML += `
+                    <tr onclick="selectPost(${p.id})" class="cursor-pointer ${rowClass}">
+                        <td class="p-4 text-center text-xs text-gray-400 font-mono">${p.board_seq_id}</td>
+                        <td class="p-4 text-sm text-gray-900 font-medium hover:text-indigo-600 transition-colors">${escapeHtml(p.title)}</td>
+                        <td class="p-4 text-center text-xs text-gray-500">익명</td>
+                        <td class="p-4 text-center text-xs text-gray-400 font-mono">${p.created_at}</td>
+                    </tr>
+                `;
+            });
+
+            if (totalPages > 1) {
+                const prevBtn = document.createElement('button');
+                prevBtn.className = `px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${currentPage === 1 ? 'text-gray-300 cursor-not-allowed bg-gray-100' : 'bg-white hover:bg-indigo-50 text-indigo-700 border border-gray-200'}`;
+                prevBtn.innerText = '이전';
+                if (currentPage > 1) {
+                    prevBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        currentPage--;
+                        renderMainPostList();
+                    };
+                }
+                pagingContainer.appendChild(prevBtn);
+
+                for (let i = 1; i <= totalPages; i++) {
+                    const pageBtn = document.createElement('button');
+                    const isCurrentPage = i === currentPage;
+                    pageBtn.className = `px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${isCurrentPage ? 'bg-indigo-600 text-white shadow-md' : 'bg-white hover:bg-indigo-50 text-gray-700 border border-gray-200'}`;
+                    pageBtn.innerText = i;
+                    pageBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        currentPage = i;
+                        renderMainPostList();
+                    };
+                    pagingContainer.appendChild(pageBtn);
+                }
+
+                const nextBtn = document.createElement('button');
+                nextBtn.className = `px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${currentPage === totalPages ? 'text-gray-300 cursor-not-allowed bg-gray-100' : 'bg-white hover:bg-indigo-50 text-indigo-700 border border-gray-200'}`;
+                nextBtn.innerText = '다음';
+                if (currentPage < totalPages) {
+                    nextBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        currentPage++;
+                        renderMainPostList();
+                    };
+                }
+                pagingContainer.appendChild(nextBtn);
+            }
+        }
+
+        function initApp() {
+            console.log("App initialized.");
         }
 
         // --- Initialization and Global Polling ---

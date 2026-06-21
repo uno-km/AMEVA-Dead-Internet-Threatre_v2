@@ -1,6 +1,6 @@
 import os
 import logging
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
 
@@ -46,6 +46,15 @@ def init_db():
     
     db = SessionLocal()
     try:
+        # Check if current_activity column exists in active_nodes, if not, add it
+        try:
+            db.execute(text("ALTER TABLE active_nodes ADD COLUMN current_activity VARCHAR DEFAULT 'Idle'"))
+            db.commit()
+            logger.info("[DB] Added current_activity column to active_nodes table.")
+        except Exception:
+            # Ignore if column already exists
+            db.rollback()
+
         # Load personas from personas.json if it exists
         personas = {}
         try:

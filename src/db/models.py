@@ -59,6 +59,7 @@ class ActiveNode(Base):
     bot_name = Column(String, index=True)
     status = Column(String, default="ACTIVE")
     hardware_mode = Column(String, default="CPU")  # CPU or GPU
+    current_activity = Column(String, default="Idle")
     last_seen = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class BotState(Base):
