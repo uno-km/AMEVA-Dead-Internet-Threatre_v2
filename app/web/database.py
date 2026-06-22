@@ -6,7 +6,7 @@ from sqlalchemy.orm import declarative_base
 
 logger = logging.getLogger("Database")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ameva_society.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/ameva_society.db")
 
 # DB I/O 쿼리 내역을 콘솔(파이썬 터미널)에 실시간으로 출력하도록 echo=True 추가
 engine = create_engine(
@@ -23,9 +23,6 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     try:
-        # Docker on Windows bind mounts often fail with WAL mode due to shared memory lock issues.
-        # We will use the default journal_mode (DELETE) to avoid disk I/O errors natively.
-        # cursor.execute("PRAGMA journal_mode=WAL")  <- Removed to prevent disk I/O error
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA temp_store=MEMORY")
     except Exception as e:
@@ -38,7 +35,7 @@ Base = declarative_base()
 
 def init_db():
     """앱 기동 시 최초 1회 실행되는 DB 초기화 로직"""
-    from src.db.models import BotState, Board, Session, CurrentAgentState
+    from app.web.models import BotState, Board, Session, CurrentAgentState
     import json
     
     # 메타데이터 기반 테이블 자동 생성
@@ -133,7 +130,7 @@ def init_db():
         logger.error(f"[DB ERROR] Failed to initialize database: {e}")
         db.rollback()
     finally:
-        db.close() # 세션 반환은 선택이 아닌 필수입니다.
+        db.close()
 
 def get_db():
     db = SessionLocal()

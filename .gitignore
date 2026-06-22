@@ -25,3 +25,5 @@ data/*.log
 # Downloaded models
 models/
 *.gguf
+
+.env
