@@ -202,11 +202,26 @@ async def create_board_post(board_name: str, req: CreateBoardPostReq, db: DbSess
 @router.get("/api/nodes/active")
 async def get_active_nodes(db: DbSession = Depends(get_db)):
     import datetime
+    # GPU 오프로드 가능 여부 확인
+    gpu_mode = "CPU"
+    try:
+        from llama_cpp import llama_supports_gpu_offload
+        if llama_supports_gpu_offload():
+            gpu_mode = "GPU"
+    except Exception:
+        # llama_cpp가 없거나 호출 실패 시 GPUtil 등으로 간접 확인
+        try:
+            import GPUtil
+            if GPUtil.getGPUs():
+                gpu_mode = "GPU"
+        except Exception:
+            pass
+            
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
     nodes = [
-        {"bot_name": "bot_1", "hardware_mode": "CPU", "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
-        {"bot_name": "bot_2", "hardware_mode": "CPU", "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
-        {"bot_name": "bot_3", "hardware_mode": "CPU", "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str}
+        {"bot_name": "bot_1", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
+        {"bot_name": "bot_2", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
+        {"bot_name": "bot_3", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str}
     ]
     return {
         "active_count": 3,
@@ -599,6 +614,20 @@ async def get_bot_trajectory(
 # REST API: Simulation Control & System Status (Sim API)
 # -----------------------------------------------------------------
 
+class UpdateActivityReq(BaseModel):
+    activity: str
+    state: Optional[str] = None
+
+@router.post("/api/system/activity")
+async def update_system_activity(req: UpdateActivityReq):
+    state_manager.current_activity = req.activity
+    if req.state:
+        try:
+            state_manager.set_state(SystemState(req.state))
+        except Exception:
+            pass
+    return {"success": True}
+
 @router.get("/api/system/status")
 async def get_system_status():
     """
@@ -615,7 +644,9 @@ async def get_system_status():
             "ameva-llm-god": "RUNNING",
             "ameva-llm-bot-1": "RUNNING",
             "ameva-llm-bot-2": "RUNNING",
-            "ameva-llm-bot-3": "RUNNING"
+            "ameva-llm-bot-3": "RUNNING",
+            "ameva-llm-bot-4": "RUNNING",
+            "ameva-llm-bot-5": "RUNNING"
         }
     }
 
@@ -628,18 +659,14 @@ class SetupStartReq(BaseModel):
 @router.post("/api/control/setup_and_start")
 async def setup_and_start(req: SetupStartReq):
     """
-    설정을 초기화하고 브라우징 시뮬레이션을 시작합니다.
+    설정을 초기화하고 브라우징 시뮬레이션을 시작합니다. (클라이언트 제어)
     """
     if state_manager.state != SystemState.IDLE:
         return {"error": "System is busy."}
     
     state_manager.set_state(SystemState.RUNNING)
     state_manager.current_activity = "시뮬레이션 초기화 중..."
-    
-    # 백그라운드 태스크 실행 (runner.py)
-    from app.services.runner import run_session
-    asyncio.create_task(run_session())
-    return {"message": "Simulation started successfully"}
+    return {"message": "Simulation started successfully (Client side)"}
 
 class NewSessionReq(BaseModel):
     inference_mode: str = "sequential"
@@ -650,9 +677,7 @@ async def control_new(req: NewSessionReq = None):
         return {"error": "System is busy."}
     
     state_manager.set_state(SystemState.RUNNING)
-    from app.services.runner import run_session
-    asyncio.create_task(run_session())
-    return {"message": "New browsing session started"}
+    return {"message": "New browsing session started (Client side)"}
 
 @router.post("/api/control/pause")
 async def control_pause():
@@ -686,6 +711,4 @@ async def control_restart(post_id: int, db: DbSession = Depends(get_db)):
         
     session_id = post.session_id
     state_manager.set_state(SystemState.RUNNING)
-    from app.services.runner import restart_session
-    asyncio.create_task(restart_session(session_id))
-    return {"message": f"Restarting post {post_id} (Session {session_id})"}
+    return {"message": f"Restarting post {post_id} (Session {session_id}) (Client side)"}

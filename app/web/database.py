@@ -8,15 +8,19 @@ logger = logging.getLogger("Database")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/ameva_society.db")
 
-# DB I/O 쿼리 내역을 콘솔(파이썬 터미널)에 실시간으로 출력하도록 echo=True 추가
+# DB I/O 쿼리 내역 로깅 설정 (기본값은 끄고, 필요시 환경변수 DB_ECHO=true로 켬)
+db_echo = os.getenv("DB_ECHO", "false").lower() == "true"
 engine = create_engine(
     DATABASE_URL, 
     connect_args={"check_same_thread": False, "timeout": 15},
-    echo=True
+    echo=db_echo
 )
 
-# SQLAlchemy 내부 로거가 쿼리를 출력하도록 설정
-logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+# SQLAlchemy 내부 로거 설정
+if db_echo:
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+else:
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 # [핵심] SQLite 커넥션 생성 시 커널 레벨 PRAGMA(설정) 강제 주입
 @event.listens_for(engine, "connect")
@@ -60,7 +64,7 @@ def init_db():
         except Exception as pe:
             logger.warning(f"Could not load personas.json: {pe}")
 
-        bots = ["bot_1", "bot_2", "bot_3"]
+        bots = ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]
         
         # 봇 상태 테이블 초기 데이터 삽입 및 페르소나 설정
         for b in bots:
