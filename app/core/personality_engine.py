@@ -95,7 +95,7 @@ class PersonalityEngine:
         role_triplet = {"bot_1": {...role profile...}, ...}
         """
         import json as _json
-        bots = ["bot_1", "bot_2", "bot_3"]
+        bots = ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]
 
         for bot_name in bots:
             # Get role profile for this bot

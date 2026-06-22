@@ -235,6 +235,14 @@ class PromptAdapter:
             "bot_3": (
                 "Style: Emotional, highly reactive, uses lowercase internet slang (rn, cuz, tho, wtf).\n"
                 "Forbidden phrases: 'So you think', 'Genius', 'That's rich', 'Newsflash'."
+            ),
+            "bot_4": (
+                "Style: Highly cynical, sarcastic, brief. Points out real-world hypocrisy.\n"
+                "Forbidden phrases: 'So you think', 'Wow', 'Newsflash'."
+            ),
+            "bot_5": (
+                "Style: Bizarre, conspiratorial, obsessed with the simulated nature of reality. Mentions 'dead internet'.\n"
+                "Forbidden phrases: 'So you think', 'Wow', 'Newsflash'."
             )
         }
         current_style = style_profile.get(current_bot, "Style: Cynical, argumentative.")
@@ -281,7 +289,7 @@ class PromptAdapter:
             sections.append(f"--- START OF RECENT CONVERSATION ---\n{recent_history}\n--- END OF RECENT CONVERSATION ---")
 
         # --- 5. Instruction & Claim Anchor ---
-        other_bots = [b for b in ["bot_1", "bot_2", "bot_3"] if b != current_bot]
+        other_bots = [b for b in ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"] if b != current_bot]
         sections.append(
             f"Task: Write a single 1-2 sentence cynical reply challenging the opponent's core logic.\n\n"
             f"CRITICAL GUIDELINES:\n"

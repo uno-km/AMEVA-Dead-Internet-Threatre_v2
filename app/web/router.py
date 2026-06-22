@@ -199,33 +199,44 @@ async def create_board_post(board_name: str, req: CreateBoardPostReq, db: DbSess
     db.refresh(post)
     return {"success": True, "id": post.id}
 
-@router.get("/api/nodes/active")
-async def get_active_nodes(db: DbSession = Depends(get_db)):
+# 실시간 온라인 에이전트 인메모리 캐시 (bot_name -> {last_seen, hardware_mode, current_activity})
+ACTIVE_AGENTS = {}
+
+class NodePingReq(BaseModel):
+    bot_name: str
+    hardware_mode: Optional[str] = "CPU"
+    current_activity: Optional[str] = "Idle"
+
+@router.post("/api/nodes/ping")
+async def node_ping(req: NodePingReq):
     import datetime
-    # GPU 오프로드 가능 여부 확인
-    gpu_mode = "CPU"
-    try:
-        from llama_cpp import llama_supports_gpu_offload
-        if llama_supports_gpu_offload():
-            gpu_mode = "GPU"
-    except Exception:
-        # llama_cpp가 없거나 호출 실패 시 GPUtil 등으로 간접 확인
-        try:
-            import GPUtil
-            if GPUtil.getGPUs():
-                gpu_mode = "GPU"
-        except Exception:
-            pass
+    ACTIVE_AGENTS[req.bot_name] = {
+        "last_seen": datetime.datetime.now(),
+        "hardware_mode": req.hardware_mode,
+        "current_activity": req.current_activity
+    }
+    return {"success": True}
+
+@router.get("/api/nodes/active")
+async def get_active_nodes():
+    import datetime
+    now = datetime.datetime.now()
+    active_nodes = []
+    
+    # 15초 이내에 핑이 수신된 에이전트만 액티브 처리
+    for bot_name, info in list(ACTIVE_AGENTS.items()):
+        delta = (now - info["last_seen"]).total_seconds()
+        if delta < 15.0:
+            active_nodes.append({
+                "bot_name": bot_name,
+                "hardware_mode": info["hardware_mode"],
+                "current_activity": info["current_activity"],
+                "last_seen": info["last_seen"].strftime("%H:%M:%S")
+            })
             
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-    nodes = [
-        {"bot_name": "bot_1", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
-        {"bot_name": "bot_2", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str},
-        {"bot_name": "bot_3", "hardware_mode": gpu_mode, "current_activity": getattr(state_manager, "current_activity", "Idle"), "last_seen": now_str}
-    ]
     return {
-        "active_count": 3,
-        "nodes": nodes
+        "active_count": len(active_nodes),
+        "nodes": active_nodes
     }
 
 # -----------------------------------------------------------------
