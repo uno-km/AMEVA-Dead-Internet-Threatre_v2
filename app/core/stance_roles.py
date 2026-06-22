@@ -113,35 +113,36 @@ def get_role_profile(role_label: str) -> dict:
 
 def assign_initial_role_triplet(seed: Optional[int] = None) -> dict[str, dict]:
     """
-    세션 시작 시 3개 봇에 역할을 배정한다.
+    세션 시작 시 5개 봇에 역할을 배정한다. (5봇으로 확장)
 
     배정 규칙:
       - pole_a_hardliner + pole_b_hardliner는 항상 배정
-      - 3번째 봇은 _THIRD_ROLE_POOL에서 랜덤 선택
-      - 세 봇의 순서는 무작위로 섞음 (어떤 봇이 hardliner가 될지 랜덤)
+      - 3~5번째 봇은 _THIRD_ROLE_POOL에서 랜덤 선택
+      - 5봇에 역할을 랜덤으로 섞어 배정
       
     Returns:
       {
         "bot_1": {...role profile...},
         "bot_2": {...role profile...},
-        "bot_3": {...role profile...}
+        "bot_3": {...role profile...},
+        "bot_4": {...role profile...},
+        "bot_5": {...role profile...}
       }
     """
     if seed is not None:
         random.seed(seed)
 
-    bots = ["bot_1", "bot_2", "bot_3"]
-
-    # 양극단 2명은 고정, 3번째 역할만 랜덤
-    third_role_label = random.choice(_THIRD_ROLE_POOL)
+    bots = ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]
 
     role_labels = [
         "pole_a_hardliner",
         "pole_b_hardliner",
-        third_role_label,
     ]
+    # 남은 3개 봇에 대한 랜덤 역할 선택
+    for _ in range(3):
+        role_labels.append(random.choice(_THIRD_ROLE_POOL))
 
-    # 3봇에 역할을 랜덤으로 섞어 배정
+    # 5봇에 역할을 랜덤으로 섞어 배정
     random.shuffle(role_labels)
 
     triplet = {}
