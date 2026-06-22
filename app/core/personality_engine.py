@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 
-from src.db.models import CurrentAgentState, AgentStateSnapshot, EdgeState
+from app.web.models import CurrentAgentState, AgentStateSnapshot, EdgeState
 
 logger = logging.getLogger("LPDE")
 

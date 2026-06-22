@@ -125,17 +125,18 @@ class PromptAdapter:
     # Gist Generation (for Structured History)
     # -----------------------------------------------------------------
 
-    async def _generate_gist(self, bot_name: str, msg: str) -> str:
+    async def _generate_gist(self, bot_name: str, msg: str, llm_client) -> str:
         """Generate a short stance summary via main LLM with heuristic fallback."""
         fallback = msg[:60].rstrip() + ("..." if len(msg) > 60 else "")
+        if not llm_client:
+            return fallback
         try:
-            from src.orchestration.runner import main_llm
             prompt = (
                 f"Summarize this statement by {bot_name} into one short English phrase (5-10 words). "
                 f"Output ONLY the summary phrase, nothing else.\n"
                 f"Statement: \"{msg}\""
             )
-            result = await main_llm.generate_completion(
+            result = await llm_client.generate_completion(
                 "You summarize forum comments into short stance descriptions.",
                 prompt,
                 max_tokens=30
@@ -151,7 +152,7 @@ class PromptAdapter:
     # Structured History Builder
     # -----------------------------------------------------------------
 
-    async def build_structured_history(self, items: List[dict]) -> str:
+    async def build_structured_history(self, items: List[dict], llm_client) -> str:
         """
         Convert conversation items into structured stance-log format.
         items: [{"bot_name": ..., "message": ...}, ...]
@@ -169,7 +170,7 @@ class PromptAdapter:
                 gist = GIST_CACHE.get(cache_key)
 
             if not gist:
-                gist = await self._generate_gist(bot_name, msg)
+                gist = await self._generate_gist(bot_name, msg, llm_client)
                 async with GIST_CACHE_LOCK:
                     GIST_CACHE[cache_key] = gist
 
@@ -256,7 +257,7 @@ class PromptAdapter:
 
         # --- 3. Role Orientation & Identity Guarantee (Phase 3) ---
         if role_meta:
-            from src.core.stance_roles import decode_role_orientation
+            from app.core.stance_roles import decode_role_orientation
             orientation_text = decode_role_orientation(role_meta)
             sections.append(orientation_text)
         else:

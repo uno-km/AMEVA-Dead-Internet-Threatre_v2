@@ -23,7 +23,7 @@ import logging
 from typing import Optional
 from sqlalchemy.orm import Session
 
-from src.db.models import InterventionLog, CurrentAgentState
+from app.web.models import InterventionLog, CurrentAgentState
 
 logger = logging.getLogger("Intervention")
 
