@@ -1,29 +1,94 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
 .Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environments
+.env
+.env.*
 env/
 venv/
 .venv/
 env.bak/
 venv.bak/
 
-# SQLite databases
+# SQLite databases & temp files
 *.sqlite3
 *.db
+*.db-journal
+*.db-shm
+*.db-wal
 data/*.db
 
 # Logs
 *.log
+*.log.*
 data/*.log
 
-# IDEs
+# IDEs and editors
 .vscode/
 .idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
-# Downloaded models
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Downloaded models / Large files
 models/
 *.gguf
 
-.env
+# Backups and temp files
+*.bak
+*.tmp
+*.temp
+temp/
+tmp/
