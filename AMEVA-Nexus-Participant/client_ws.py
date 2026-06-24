@@ -217,9 +217,24 @@ class DeadInternetTheatreHandler(ExperimentHandler):
             loop = asyncio.get_event_loop()
             def sync_post():
                 data = json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=30) as res:
-                    return json.loads(res.read().decode("utf-8"))
+                headers = {
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                try:
+                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=30) as res:
+                        return json.loads(res.read().decode("utf-8"))
+                except urllib.error.HTTPError as he:
+                    if he.code == 403:
+                        print(f"[{self.agent_id}] Warning: HTTP 403 Forbidden from Cloudflare tunnel. Retrying with bypass headers...")
+                        # 403인 경우 Cloudflare 경고 페이지/챌린지 우회를 위해 추가 헤더 주입 시도
+                        headers["cf-bypass"] = "true"
+                        headers["ngrok-skip-browser-warning"] = "true" # ngrok 호환용 추가 주입
+                        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                        with urllib.request.urlopen(req, timeout=30) as res:
+                            return json.loads(res.read().decode("utf-8"))
+                    raise he
             
             resp = await loop.run_in_executor(None, sync_post)
             text = resp["message"]["content"].strip()

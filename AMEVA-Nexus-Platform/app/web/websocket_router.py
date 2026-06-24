@@ -217,6 +217,10 @@ async def websocket_endpoint(
                     db.rollback()
                     logger.error(f"Heartbeat DB update failed: {e}")
 
+                # Forward heartbeat to dit_bridge so DIT server knows the agent is online!
+                envelope["agent_id"] = agent_id
+                await manager.send_personal_message(envelope, experiment_id, "dit_bridge")
+
                 await websocket.send_json({
                     "type": "ack",
                     "event_id": event_id,
