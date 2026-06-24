@@ -12,9 +12,12 @@ from app.web.database import get_db
 from app.web.models import Session, Post, Comment, BotState, CurrentAgentState, AgentStateSnapshot, EdgeState, InterventionLog, Board
 from app.services.state_manager import state_manager, SystemState, Checkpoint
 
+import os
 logger = logging.getLogger("WebRouter")
 router = APIRouter()
-templates = Jinja2Templates(directory="app/ui/templates")
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+templates = Jinja2Templates(directory=os.path.join(base_dir, "ui", "templates"))
+
 
 def safe_load(val):
     try:
@@ -122,6 +125,33 @@ async def create_post(req: CreatePostReq, db: DbSession = Depends(get_db)):
     db.add(post)
     db.commit()
     db.refresh(post)
+    
+    # DIT 로컬 event_bus에 post.created 발행
+    try:
+        import uuid, time
+        from app.services.event_bus import get_event_bus
+        bus = get_event_bus()
+        domain_event = {
+            "version": "1.0.0",
+            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event_type": "post.created",
+            "schema_version": "1.0.0",
+            "experiment_id": "EXP_TEST",
+            "session_id": str(session_id),
+            "tenant_id": "SYSTEM",
+            "agent_id": req.bot_name,
+            "timestamp": int(time.time()),
+            "idempotency_key": str(uuid.uuid4()),
+            "payload": {
+                "post_id": post.id,
+                "title": post.title,
+                "content": post.content
+            }
+        }
+        bus.publish("ameva:exp:EXP_TEST:domain", domain_event)
+    except Exception as e:
+        logger.error(f"Failed to publish post.created to local event_bus: {e}")
+        
     return {"message": "Post created successfully", "id": post.id}
 
 class CreateCommentReq(BaseModel):
@@ -145,7 +175,35 @@ async def create_comment(post_id: int, req: CreateCommentReq, db: DbSession = De
     db.commit()
     db.refresh(comment)
     
-    # Broadcast or trigger state updates if necessary, but keep it loose!
+    # DIT 로컬 event_bus에 comment.created 발행
+    try:
+        import uuid, time
+        from app.services.event_bus import get_event_bus
+        latest_session = db.query(Session).order_by(Session.id.desc()).first()
+        session_id = latest_session.id if latest_session else 1
+        bus = get_event_bus()
+        domain_event = {
+            "version": "1.0.0",
+            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event_type": "comment.created",
+            "schema_version": "1.0.0",
+            "experiment_id": "EXP_TEST",
+            "session_id": str(session_id),
+            "tenant_id": "SYSTEM",
+            "agent_id": req.bot_name,
+            "timestamp": int(time.time()),
+            "idempotency_key": str(uuid.uuid4()),
+            "payload": {
+                "comment_id": comment.id,
+                "post_id": post_id,
+                "bot_name": req.bot_name,
+                "content": comment.content
+            }
+        }
+        bus.publish("ameva:exp:EXP_TEST:domain", domain_event)
+    except Exception as e:
+        logger.error(f"Failed to publish comment.created to local event_bus: {e}")
+        
     return {"success": True, "id": comment.id}
 
 # -----------------------------------------------------------------
@@ -723,3 +781,95 @@ async def control_restart(post_id: int, db: DbSession = Depends(get_db)):
     session_id = post.session_id
     state_manager.set_state(SystemState.RUNNING)
     return {"message": f"Restarting post {post_id} (Session {session_id}) (Client side)"}
+
+# -----------------------------------------------------------------
+# REST API: Federation Webhook Receiver (Phase 3)
+# -----------------------------------------------------------------
+
+import hmac
+import hashlib
+import time
+
+DIT_WEBHOOK_SECRET = "dit_shared_secret_key"
+DIT_RECEIVED_EVENTS = [] # 테스트 검증용 수신 기록
+
+class WebhookPayload(BaseModel):
+    schema_version: str
+    site_id: str
+    experiment_id: str
+    event_id: str
+    occurred_at: str
+    event_type: str
+    payload: dict
+    extensions: dict = {}
+
+@router.post("/api/v1/site/webhook")
+async def receive_webhook_api(request: Request, db: DbSession = Depends(get_db)):
+    # 1. 헤더 검증
+    signature = request.headers.get("X-AMEVA-Signature")
+    timestamp_str = request.headers.get("X-AMEVA-Timestamp")
+    nonce = request.headers.get("X-AMEVA-Nonce")
+
+    if not all([signature, timestamp_str, nonce]):
+        return {"accepted": False, "reason": "Missing security headers"}
+
+    # timestamp 시차 검증 (5분)
+    try:
+        req_timestamp = float(timestamp_str)
+    except ValueError:
+        return {"accepted": False, "reason": "Invalid timestamp format"}
+
+    if abs(time.time() - req_timestamp) > 300:
+        return {"accepted": False, "reason": "Timestamp expired"}
+
+    # 2. 서명 확인
+    body_bytes = await request.body()
+    message = f"{timestamp_str}.{nonce}.".encode("utf-8") + body_bytes
+    expected_sig = hmac.new(
+        DIT_WEBHOOK_SECRET.encode("utf-8"),
+        message,
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_sig, signature):
+        return {"accepted": False, "reason": "Invalid HMAC signature"}
+
+    # 3. Payload 로드 및 처리
+    try:
+        body_json = json.loads(body_bytes)
+        event_id = body_json.get("event_id")
+        event_type = body_json.get("event_type")
+
+        # 수신 리스트에 기록 (테스트 단언 확인용)
+        DIT_RECEIVED_EVENTS.append(body_json)
+        logger.info(f"[DIT Webhook] Successfully processed event {event_type} (ID: {event_id})")
+
+        return {"accepted": True, "event_id": event_id}
+    except Exception as e:
+        logger.error(f"Error processing webhook body: {e}")
+        return {"accepted": False, "reason": str(e)}
+
+@router.post("/api/v1/site/reconciliation/sync")
+async def site_reconciliation_sync_api(
+    platform_base_url: str,
+    since_timestamp: float = 0.0,
+    db: DbSession = Depends(get_db)
+):
+    import httpx
+    # 플랫폼의 pull API를 호출하여 동기화 유실본 수집
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                f"{platform_base_url}/api/v1/federation/reconciliation/events",
+                params={"since_timestamp": since_timestamp, "limit": 50}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                events = data.get("events", [])
+                for ev in events:
+                    DIT_RECEIVED_EVENTS.append(ev)
+                return {"success": True, "synced_count": len(events)}
+            return {"success": False, "reason": f"Platform returned status {resp.status_code}"}
+        except Exception as e:
+            return {"success": False, "reason": str(e)}
+

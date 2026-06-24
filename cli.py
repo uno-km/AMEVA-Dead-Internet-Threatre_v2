@@ -5,7 +5,7 @@ import sys
 import time
 
 def send_command(cmd, session_id=None):
-    url = f"http://localhost:8050/api/control/{cmd}"
+    url = f"http://localhost:8080/api/control/{cmd}"
     if session_id:
         url += f"/{session_id}"
     req = urllib.request.Request(url, method="POST")
@@ -24,7 +24,7 @@ def send_command(cmd, session_id=None):
         return False
 
 def wait_for_state(target_states, timeout=30):
-    url = "http://localhost:8050/api/system/status"
+    url = "http://localhost:8080/api/system/status"
     req = urllib.request.Request(url, method="GET")
     start_time = time.time()
     
@@ -45,7 +45,7 @@ def wait_for_state(target_states, timeout=30):
     return False
 
 def get_status():
-    url = "http://localhost:8050/api/system/status"
+    url = "http://localhost:8080/api/system/status"
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req) as response:
@@ -70,6 +70,10 @@ def main():
     print("  resume         - Resume a paused session")
     print("  stop           - Force stop the current session")
     print("  restart <post_id> - Restore and continue an old session")
+    print("  sre halt       - Emergency system halt")
+    print("  sre reconcile <exp_id> - Manually trigger reconciliation verify")
+    print("  sre failover <node_id> - Trigger benchmark to check and failover node")
+    print("  sre replay <exp_id>    - Run deterministic replay audit")
     print("  exit           - Close this remote controller")
     print("========================================")
     
@@ -103,7 +107,7 @@ def main():
                         elif arg.startswith("chat="):
                             payload["chat_mode"] = arg.split("=")[1]
                 
-                url = "http://localhost:8050/api/control/new"
+                url = "http://localhost:8080/api/control/new"
                 req = urllib.request.Request(url, method="POST")
                 data = json.dumps(payload).encode('utf-8')
                 req.add_header('Content-Type', 'application/json')
@@ -147,6 +151,68 @@ def main():
                             print(f"[완료] {user_input[1]}번 글(Post)의 세션 이어하기(RUNNING)를 시작합니다!")
                 else:
                     print("Usage: restart <post_id>")
+            elif cmd == "sre":
+                if len(user_input) < 2:
+                    print("Usage: sre [halt|reconcile|failover|replay]")
+                    continue
+                sub = user_input[1].lower()
+                if sub == "halt":
+                    req = urllib.request.Request("http://localhost:8050/api/v1/sre/chaos", method="POST")
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = json.dumps({"drop_rate": 1.0}).encode('utf-8')
+                    try:
+                        urllib.request.urlopen(req)
+                        print("[SRE] Emergency halt activated: platform requests will be blocked.")
+                    except Exception as e:
+                        print(f"[SRE Error] Failed to configure chaos: {e}")
+                    send_command("stop")
+                elif sub == "reconcile":
+                    if len(user_input) < 3:
+                        print("Usage: sre reconcile <exp_id>")
+                        continue
+                    exp_id = user_input[2]
+                    req = urllib.request.Request("http://localhost:8050/api/v1/federation/reconciliation/verify", method="POST")
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = json.dumps({"experiment_id": exp_id, "total_accrued_reward": 0.0, "total_charged_fee": 0.0}).encode('utf-8')
+                    try:
+                        with urllib.request.urlopen(req) as res:
+                            res_json = json.loads(res.read().decode('utf-8'))
+                            print(f"[SRE Reconcile] Experiment: {res_json.get('experiment_id')}")
+                            print(f"Verified: {res_json.get('verified')}, Details: {res_json.get('details')}")
+                            print(f"Platform Total Accrued: {res_json.get('platform_accrued')}, Charged: {res_json.get('platform_charged')}")
+                    except Exception as e:
+                        print(f"[SRE Error] Reconcile verification failed: {e}")
+                elif sub == "failover":
+                    if len(user_input) < 3:
+                        print("Usage: sre failover <node_id>")
+                        continue
+                    node_id = user_input[2]
+                    req = urllib.request.Request("http://localhost:8050/api/v1/sre/benchmark/trigger", method="POST")
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = json.dumps({"node_id": node_id}).encode('utf-8')
+                    try:
+                        with urllib.request.urlopen(req) as res:
+                            res_json = json.loads(res.read().decode('utf-8'))
+                            print(f"[SRE Failover] Node: {node_id} trigger failover benchmark completed.")
+                            print(f"Result detail: {res_json.get('result')}")
+                    except Exception as e:
+                        print(f"[SRE Error] Failover benchmark failed: {e}")
+                elif sub == "replay":
+                    if len(user_input) < 3:
+                        print("Usage: sre replay <exp_id>")
+                        continue
+                    exp_id = user_input[2]
+                    req = urllib.request.Request("http://localhost:8050/api/v1/sre/replay", method="POST")
+                    req.add_header('Content-Type', 'application/json')
+                    req.data = json.dumps({"experiment_id": exp_id}).encode('utf-8')
+                    try:
+                        with urllib.request.urlopen(req) as res:
+                            res_json = json.loads(res.read().decode('utf-8'))
+                            print(f"[SRE Replay] Audit completed for '{exp_id}'. Status: {res_json.get('status')}")
+                    except Exception as e:
+                        print(f"[SRE Error] Replay failed: {e}")
+                else:
+                    print(f"Unknown SRE command: {sub}")
             else:
                 print(f"Unknown command: {cmd}")
         except KeyboardInterrupt:
