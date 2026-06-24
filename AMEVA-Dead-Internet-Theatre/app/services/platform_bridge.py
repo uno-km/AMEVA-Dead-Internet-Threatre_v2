@@ -96,7 +96,7 @@ class PlatformBridge:
                 raise e
 
     async def _recv_from_platform(self):
-        """플랫폼 허브로부터 온 액션(action.submitted)을 DIT 내부 actions 스트림으로 포워딩"""
+        """플랫폼 허브로부터 온 액션(action.submitted) 및 하트비트를 처리"""
         try:
             async for message in self._ws:
                 envelope = json.loads(message)
@@ -106,6 +106,20 @@ class PlatformBridge:
                     logger.info(f"[BRIDGE] Received action from Platform Hub: {envelope.get('event_id')}")
                     # DIT 로컬 event_bus에 publish
                     self.bus.publish(self.action_stream, envelope)
+                elif event_type == "agent.heartbeat":
+                    agent_id = envelope.get("agent_id")
+                    if agent_id:
+                        try:
+                            import httpx
+                            port = os.getenv("DIT_PORT", "8081")
+                            async with httpx.AsyncClient() as client:
+                                await client.post(f"http://127.0.0.1:{port}/api/nodes/ping", json={
+                                    "bot_name": agent_id,
+                                    "hardware_mode": "GPU",
+                                    "current_activity": "Active in Platform"
+                                })
+                        except Exception as e:
+                            logger.error(f"Failed to forward heartbeat to local ping endpoint: {e}")
                 elif envelope.get("type") == "ack":
                     pass # ignore ack
                 elif envelope.get("type") == "error":

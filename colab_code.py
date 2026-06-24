@@ -1,5 +1,6 @@
-# 1. Ollama 설치 및 백그라운드 실행
-print("1. Ollama 설치 중...")
+# 1. zstd 설치 및 Ollama 설치 & 백그라운드 실행
+print("1. zstd 및 Ollama 설치 중...")
+!apt-get update && apt-get install -y zstd
 !curl -fsSL https://ollama.com/install.sh | sh
 
 import subprocess
@@ -8,12 +9,16 @@ import re
 
 print("2. Ollama 서버 시작 중...")
 with open("ollama.log", "w") as f:
-    subprocess.Popen(["ollama", "serve"], stdout=f, stderr=f)
+    import os
+    env = os.environ.copy()
+    env["OLLAMA_ORIGINS"] = "*"
+    env["OLLAMA_HOST"] = "0.0.0.0"
+    subprocess.Popen(["ollama", "serve"], stdout=f, stderr=f, env=env)
 time.sleep(3)
 
-# 2. 테스트용 가벼운 모델 다운로드 (빠른 다운로드를 위해 gemma:2b 사용)
-print("3. Gemma:2b 모델 다운로드 중... (약 1.6GB)")
-!ollama pull gemma:2b
+# 2. 테스트용 가벼운 모델 다운로드 (3B급 성능이 우수한 qwen2.5:3b 사용)
+print("3. Qwen2.5:3b 모델 다운로드 중... (약 2.0GB)")
+!ollama pull qwen2.5:3b
 
 # 3. Cloudflare Tunnel 설치 및 실행 (로그인/토큰 필요 없음)
 print("4. Cloudflare 터널 설치 중...")
