@@ -91,4 +91,13 @@ models/
 *.tmp
 *.temp
 temp/
-tmp/
+tmp/
+
+# Temporary / Phase test files
+tests/test_phase*
+tests/test_recruitment_flow.py
+
+# Conversation logs & drafts
+talk/
+
+

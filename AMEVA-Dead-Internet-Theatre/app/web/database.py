@@ -6,9 +6,9 @@ from sqlalchemy.orm import declarative_base
 
 logger = logging.getLogger("Database")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/ameva_society.db")
+# DIT 사회 실험 전용 DB
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/ameva_dead_internet.db")
 
-# DB I/O 쿼리 내역 로깅 설정 (기본값은 끄고, 필요시 환경변수 DB_ECHO=true로 켬)
 db_echo = os.getenv("DB_ECHO", "false").lower() == "true"
 engine = create_engine(
     DATABASE_URL, 
@@ -16,13 +16,11 @@ engine = create_engine(
     echo=db_echo
 )
 
-# SQLAlchemy 내부 로거 설정
 if db_echo:
     logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
 else:
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
-# [핵심] SQLite 커넥션 생성 시 커널 레벨 PRAGMA(설정) 강제 주입
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
@@ -38,31 +36,35 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 def init_db():
-    """앱 기동 시 최초 1회 실행되는 DB 초기화 로직"""
+    """DIT 실험 앱 기동 시 최초 1회 실행되는 DB 초기화 로직"""
+    if DATABASE_URL.startswith("sqlite:///./data/"):
+        os.makedirs("./data", exist_ok=True)
+
     from app.web.models import BotState, Board, Session, CurrentAgentState
     import json
     
-    # 메타데이터 기반 테이블 자동 생성
     Base.metadata.create_all(bind=engine)
     
     db = SessionLocal()
     try:
-        # Check if current_activity column exists in active_nodes, if not, add it
-        try:
-            db.execute(text("ALTER TABLE active_nodes ADD COLUMN current_activity VARCHAR DEFAULT 'Idle'"))
-            db.commit()
-            logger.info("[DB] Added current_activity column to active_nodes table.")
-        except Exception:
-            # Ignore if column already exists
-            db.rollback()
-
         # Load personas from personas.json if it exists
         personas = {}
-        try:
-            with open("personas.json", "r", encoding="utf-8") as f:
-                personas = json.load(f)
-        except Exception as pe:
-            logger.warning(f"Could not load personas.json: {pe}")
+        personas_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "personas.json")
+        if os.path.exists(personas_path):
+            try:
+                with open(personas_path, "r", encoding="utf-8") as f:
+                    personas = json.load(f)
+            except Exception as pe:
+                logger.warning(f"Could not load personas.json: {pe}")
+        else:
+            # Fallback
+            personas = {
+                "bot_1": "Persona for bot 1",
+                "bot_2": "Persona for bot 2",
+                "bot_3": "Persona for bot 3",
+                "bot_4": "Persona for bot 4",
+                "bot_5": "Persona for bot 5"
+            }
 
         bots = ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]
         

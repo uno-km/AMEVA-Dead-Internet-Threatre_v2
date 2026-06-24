@@ -3,24 +3,32 @@ import sys
 import time
 import asyncio
 import httpx
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+import rich.box as rbox
 
-# Windows 인코딩 처리
+# Windows 인코딩 예외 방지 및 가상 터미널 지원 강제 활성화
 if sys.platform.startswith("win"):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
-    except AttributeError:
+        os.system("")
+    except Exception:
         pass
+
+load_dotenv()
+
+# Rich 테두리 스타일 결정 (윈도우 기본 CMD/PowerShell 인코딩 호환을 위해 ASCII 폴백 제공)
+BOX_STYLE = rbox.ASCII if os.getenv("CLI_ASCII", "false").lower() == "true" or sys.platform.startswith("win") else rbox.ROUNDED
 
 console = Console()
 
-# 환경변수 기본값
+# 환경변수 기본값 (DIT 서버 모니터링 포트)
 SERVER_HOST = os.getenv("SERVER_HOST", "127.0.0.1")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8050"))
+SERVER_PORT = int(os.getenv("DIT_PORT", os.getenv("SERVER_PORT", "8080")))
 API_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 def log_debug(msg: str):
@@ -154,7 +162,7 @@ async def run_global_dashboard():
                         f"{eff:.1f}"
                     )
                     
-                left_panel = Panel(left_table, title="[ 에이전트 통합 접속 & 상태 관제 ]", border_style="magenta")
+                left_panel = Panel(left_table, title="[ 에이전트 통합 접속 & 상태 관제 ]", border_style="magenta", box=BOX_STYLE)
                 
                 # B. 우상단 패널: 실시간 시뮬레이터 현황
                 current_act = status_data.get("current_activity", "대기 중...")
@@ -174,7 +182,7 @@ async def run_global_dashboard():
                     
                 thought_text.append(f"활동 및 인지 기록 로그:\n", style="bold green")
                 thought_text.append(f"{current_act}\n", style="green")
-                thought_panel = Panel(thought_text, title="[ 실시간 극장 중계 & 서버 로그 ]", border_style="green")
+                thought_panel = Panel(thought_text, title="[ 실시간 극장 중계 & 서버 로그 ]", border_style="green", box=BOX_STYLE)
                 
                 # C. 우하단 패널: 통합 댓글 피드
                 comment_table = Table(expand=True, box=None)
@@ -200,12 +208,12 @@ async def run_global_dashboard():
                     content = c["content"]
                     comment_table.add_row(bot_styled, content, c["created_at"])
                     
-                comment_panel = Panel(comment_table, title="[ 실시간 전체 게시판 댓글 피드 ]", border_style="cyan")
+                comment_panel = Panel(comment_table, title="[ 실시간 전체 게시판 댓글 피드 ]", border_style="cyan", box=BOX_STYLE)
                 
                 header_text = Text("AMEVA CLI Theater - Global Observer Dashboard", justify="center", style="bold white on purple")
-                header_panel = Panel(header_text, border_style="purple")
+                header_panel = Panel(header_text, border_style="purple", box=BOX_STYLE)
                 footer_text = Text(f"서버 주소: {API_URL}  |  종료하려면 [Ctrl+C]", justify="center", style="dim")
-                footer_panel = Panel(footer_text)
+                footer_panel = Panel(footer_text, box=BOX_STYLE)
                 
                 from rich.console import Group
                 master_table = Table.grid(expand=True)
