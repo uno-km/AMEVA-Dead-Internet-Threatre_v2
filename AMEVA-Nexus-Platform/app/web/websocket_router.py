@@ -229,11 +229,36 @@ async def websocket_endpoint(
                 })
                 continue
 
-            if event_type not in ["action.submitted", "agent.heartbeat", "post.created", "comment.created"]:
+            if event_type not in ["action.submitted", "agent.heartbeat", "post.created", "comment.created", "lobby.chat.message"]:
                 await websocket.send_json({
                     "type": "error",
                     "error_code": "UNSUPPORTED_EVENT_TYPE",
-                    "message": "Gateway only accepts 'action.submitted', 'agent.heartbeat', or domain events from bridge"
+                    "message": "Gateway only accepts 'action.submitted', 'agent.heartbeat', 'lobby.chat.message', or domain events from bridge"
+                })
+                continue
+
+            if event_type == "lobby.chat.message":
+                try:
+                    from app.web.models import LobbyChatMessage
+                    chat_msg = LobbyChatMessage(
+                        bot_name=agent_id,
+                        content=envelope.get("payload", {}).get("content", ""),
+                        created_at=datetime.now()
+                    )
+                    db.add(chat_msg)
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Lobby chat database store failed: {e}")
+
+                # Broadcast chat message to all connected clients in this experiment/lobby
+                await manager.broadcast(envelope, experiment_id)
+
+                await websocket.send_json({
+                    "type": "ack",
+                    "event_id": event_id,
+                    "accepted": True,
+                    "received_at": datetime.now().isoformat()
                 })
                 continue
 

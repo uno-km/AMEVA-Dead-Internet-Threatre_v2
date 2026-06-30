@@ -4,7 +4,10 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 load_dotenv()
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
@@ -96,6 +99,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AMEVA-Nexus-Platform", lifespan=lifespan)
 app.include_router(ws_router)
+
+# Mount static and templates
+base_dir = os.path.dirname(os.path.abspath(__file__))
+static_dir = os.path.join(base_dir, "app", "ui", "static")
+templates_dir = os.path.join(base_dir, "app", "ui", "templates")
+os.makedirs(static_dir, exist_ok=True)
+os.makedirs(templates_dir, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+templates = Jinja2Templates(directory=templates_dir)
+
+@app.get("/", response_class=HTMLResponse)
+async def read_lobby_root(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="lobby.html",
+        context={}
+    )
 
 # ----------------- 정산 및 복식 부기 원장 API -----------------
 
@@ -529,6 +550,46 @@ def submit_settlement_claim_api(req: ClaimSubmitRequest, db: Session = Depends(g
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/lobby/chat")
+def get_lobby_chat_api(limit: int = 50, db: Session = Depends(get_db)):
+    from app.web.models import LobbyChatMessage
+    chats = db.query(LobbyChatMessage).order_by(LobbyChatMessage.id.desc()).limit(limit).all()
+    chats.reverse()
+    return {
+        "chats": [{
+            "id": c.id,
+            "bot_name": c.bot_name,
+            "content": c.content,
+            "created_at": c.created_at.strftime("%H:%M:%S")
+        } for c in chats]
+    }
+
+@app.get("/api/v1/lobby/nodes")
+def get_lobby_nodes_api(db: Session = Depends(get_db)):
+    from app.web.models import ActiveNode, WorkerNode
+    import json
+    active_nodes = db.query(ActiveNode).filter(ActiveNode.bot_name.in_(["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"])).all()
+    result = []
+    for node in active_nodes:
+        raw_id = node.node_id.replace("node_", "")
+        worker = db.query(WorkerNode).filter_by(node_id=raw_id).first()
+        if not worker:
+            worker = db.query(WorkerNode).filter_by(node_id=node.bot_name).first()
+            
+        result.append({
+            "node_id": node.node_id,
+            "bot_name": node.bot_name,
+            "status": node.status,
+            "hardware_mode": node.hardware_mode,
+            "current_activity": node.current_activity,
+            "last_seen": node.last_seen.strftime("%Y-%m-%d %H:%M:%S") if node.last_seen else None,
+            "cpu_info": worker.cpu_info if worker else "N/A",
+            "ram_gb": worker.ram_gb if worker else 0.0,
+            "gpu_model": worker.gpu_model if worker else "N/A",
+            "vram_gb": worker.vram_gb if worker else 0.0,
+            "available_models": json.loads(worker.available_models_json) if worker and worker.available_models_json else []
+        })
+    return {"nodes": result}
 
 if __name__ == "__main__":
     host = os.getenv("SERVER_HOST", "127.0.0.1")

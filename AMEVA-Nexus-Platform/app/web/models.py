@@ -208,3 +208,11 @@ class ArchiveAgentStateSnapshot(Base):
     residual_json = Column(Text, default="[]")
     role_label = Column(String, default="swing_moderate")
     created_at = Column(DateTime, default=datetime.now)
+
+class LobbyChatMessage(Base):
+    __tablename__ = 'lobby_chat_messages'
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True, nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+

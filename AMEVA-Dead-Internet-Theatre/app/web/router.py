@@ -283,6 +283,8 @@ async def get_active_nodes():
     
     # 15초 이내에 핑이 수신된 에이전트만 액티브 처리
     for bot_name, info in list(ACTIVE_AGENTS.items()):
+        if bot_name not in ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]:
+            continue
         delta = (now - info["last_seen"]).total_seconds()
         if delta < 15.0:
             active_nodes.append({

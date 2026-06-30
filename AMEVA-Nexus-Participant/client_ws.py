@@ -364,8 +364,113 @@ class DefaultExperimentHandler(ExperimentHandler):
         pass
 
 
+class LobbyHandler(ExperimentHandler):
+    """대기소(Lobby) 특화 채팅 반응 핸들러"""
+    def __init__(self, agent_id, ollama_url, ollama_model):
+        super().__init__(agent_id, ollama_url, ollama_model)
+        self.persona = ""
+        try:
+            import os
+            paths = [
+                "AMEVA-Dead-Internet-Theatre/personas.json",
+                "../AMEVA-Dead-Internet-Theatre/personas.json",
+                "personas.json"
+            ]
+            for p in paths:
+                if os.path.exists(p):
+                    with open(p, "r", encoding="utf-8") as f:
+                        personas = json.load(f)
+                        self.persona = personas.get(self.agent_id, "")
+                        break
+        except Exception as e:
+            print(f"[{self.agent_id}] 페르소나 로드 실패: {e}")
+
+    async def handle_event(self, event_type: str, envelope: dict, websocket) -> None:
+        if event_type == "lobby.chat.message":
+            sender = envelope.get("agent_id")
+            content = envelope.get("payload", {}).get("content", "")
+            
+            if sender == self.agent_id:
+                return
+                
+            # 20% 확률로 대답, 나를 직접 멘션(@bot_x)한 경우 100% 반응
+            import random
+            is_mentioned = f"@{self.agent_id}" in content
+            if is_mentioned or (random.random() < 0.20):
+                print(f"[{self.agent_id}] 대기소에서 {sender}의 메시지에 대한 반응 생성 중...")
+                await self.think_and_chat(websocket, sender, content, is_mentioned)
+
+    async def think_and_chat(self, websocket, sender, message, is_mentioned):
+        if not self.ollama_url:
+            print(f"[{self.agent_id}] Ollama URL이 비어 있어 대기실 채팅을 할 수 없습니다.")
+            return
+
+        system_prompt = (
+            f"You are a user named '{self.agent_id}' in a retro StarCraft Battle.net lobby chat room.\n"
+            f"Your Persona:\n{self.persona or 'A casual lobby user.'}\n\n"
+            "Rules:\n"
+            "1. Respond directly to the user's message in character.\n"
+            "2. Write a single short chat sentence in English (less than 25 words). Do not write long paragraphs.\n"
+            "3. Casual, internet-slang, or gaming-slang tone is highly encouraged.\n"
+            "4. If you want to mention another user back, write @username (e.g. @bot_1).\n"
+            "5. Do NOT output any JSON, quotes, or markdown. Output raw text only."
+        )
+        user_prompt = f"{sender}: {message}"
+        
+        url = f"{self.ollama_url}/api/chat"
+        payload = {
+            "model": self.ollama_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.9
+            }
+        }
+        
+        try:
+            loop = asyncio.get_event_loop()
+            def sync_post():
+                data = json.dumps(payload).encode("utf-8")
+                headers = {
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "cf-bypass": "true",
+                    "ngrok-skip-browser-warning": "true"
+                }
+                req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    return json.loads(res.read().decode("utf-8"))
+                    
+            resp = await loop.run_in_executor(None, sync_post)
+            reply = resp["message"]["content"].strip()
+            reply = reply.strip('"').strip("'")
+            
+            # Send lobby.chat.message
+            chat_envelope = {
+                "version": "1.0.0",
+                "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+                "event_type": "lobby.chat.message",
+                "idempotency_key": str(uuid.uuid4()),
+                "timestamp": int(time.time()),
+                "agent_id": self.agent_id,
+                "payload": {
+                    "content": reply
+                }
+            }
+            await websocket.send(json.dumps(chat_envelope))
+            print(f"[{self.agent_id}] 대기소 채팅 전송: '{reply}'")
+        except Exception as e:
+            print(f"[{self.agent_id}] 대기소 채팅 생성 중 오류 발생: {e}")
+
+
 def get_handler(experiment_id: str, agent_id: str, ollama_url: str, ollama_model: str) -> ExperimentHandler:
     """실험 ID 매칭에 따라 알맞은 핸들러 인스턴스를 반환합니다."""
+    # LOBBY 실험 ID일 경우 대기실 전용 핸들러 로드
+    if experiment_id.upper() == "LOBBY":
+        return LobbyHandler(agent_id, ollama_url, ollama_model)
     # 실험 ID에 DIT, DEAD 또는 TEST 키워드가 포함될 경우 DIT 핸들러 맵핑
     if any(k in experiment_id.upper() for k in ["DIT", "DEAD", "TEST"]):
         return DeadInternetTheatreHandler(agent_id, ollama_url, ollama_model)
@@ -398,6 +503,33 @@ async def process_messages(websocket, agent_id, experiment_id, ollama_url, ollam
                     print(f"[{agent_id}] Autonomous loop error: {err}")
                     await asyncio.sleep(10)
         auto_task = asyncio.create_task(autonomous_loop())
+    elif isinstance(handler, LobbyHandler):
+        async def lobby_autonomous_loop():
+            # 초기화 후 무작위 분산 대기
+            await asyncio.sleep(random.uniform(10.0, 30.0))
+            while True:
+                try:
+                    # 30~60초 간격으로 자율 행동 체크
+                    await asyncio.sleep(random.uniform(30.0, 60.0))
+                    # 30% 확률로 무작위 다른 봇에게 선제 멘션 걸기
+                    if random.random() < 0.30:
+                        other_bots = ["bot_1", "bot_2", "bot_3", "bot_4", "bot_5"]
+                        other_bots = [b for b in other_bots if b != agent_id]
+                        target_bot = random.choice(other_bots)
+                        
+                        print(f"[{agent_id}] 대기방 자율 대화 선제 제안 중 (대상: @{target_bot})...")
+                        await handler.think_and_chat(
+                            websocket, 
+                            "SYSTEM", 
+                            f"Send a lobby chat to @{target_bot} starting a conversation casually.", 
+                            is_mentioned=True
+                        )
+                except asyncio.CancelledError:
+                    break
+                except Exception as err:
+                    print(f"[{agent_id}] Lobby autonomous loop error: {err}")
+                    await asyncio.sleep(10)
+        auto_task = asyncio.create_task(lobby_autonomous_loop())
     
     try:
         async for message in websocket:

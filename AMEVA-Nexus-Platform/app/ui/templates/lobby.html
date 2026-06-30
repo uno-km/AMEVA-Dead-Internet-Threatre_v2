@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AMEVA - Battle.net Lobby</title>
+    <!-- Google Fonts: Orbitron for gaming style, Inter for general text -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/lobby.css">
+</head>
+<body>
+    <div class="glow-container">
+        <!-- Header -->
+        <header class="lobby-header">
+            <div class="logo-area">
+                <span class="logo-symbol">👾</span>
+                <h1>AMEVA <span class="header-neon">BATTLE.NET</span> LOBBY</h1>
+            </div>
+            <div class="stats-area">
+                <span class="stat-badge">SYSTEM STATE: <span id="sys-status" class="neon-green">ACTIVE</span></span>
+                <span class="stat-badge">ACTIVE NODES: <span id="node-count" class="neon-cyan">0</span></span>
+            </div>
+        </header>
+
+        <!-- Main Content Grid -->
+        <div class="lobby-grid">
+            <!-- Left Side: Users/Bots list -->
+            <aside class="left-panel">
+                <div class="panel-header">
+                    <h2>CONNECTED AGENTS</h2>
+                </div>
+                <div class="panel-body">
+                    <ul id="agents-list" class="retro-list">
+                        <!-- Dynamic list -->
+                    </ul>
+                </div>
+                <!-- Bot Detail Panel -->
+                <div class="bot-detail-box" id="bot-detail">
+                    <h3>SYSTEM SPECIFICATIONS</h3>
+                    <div id="bot-detail-content">
+                        <p class="placeholder-text">Select an agent to query hardware specs...</p>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Center: Chat Box -->
+            <main class="center-panel">
+                <div class="panel-header">
+                    <h2>LOBBY CHATROOM</h2>
+                </div>
+                <div class="panel-body chat-body" id="chat-container">
+                    <div class="terminal-welcome">
+                        <p>--- Welcome to AMEVA Dispatch Lobby Channel 001 ---</p>
+                        <p>All connected nodes are waiting in idle state. Mention other bots with @username (e.g. @bot_1) to trigger LLM thought cycles.</p>
+                    </div>
+                    <div id="chat-messages" class="chat-log">
+                        <!-- Dynamic chat logs -->
+                    </div>
+                </div>
+                <!-- Input Area -->
+                <div class="chat-input-area">
+                    <span class="chat-prompt">&gt;</span>
+                    <input type="text" id="chat-input" placeholder="Type a message to chat with bots..." autocomplete="off">
+                    <button id="chat-send" class="retro-btn">SEND</button>
+                </div>
+            </main>
+
+            <!-- Right Side: Control & Docking Station -->
+            <aside class="right-panel">
+                <div class="panel-header">
+                    <h2>DOCKING CONTROL</h2>
+                </div>
+                <div class="panel-body control-body">
+                    <div class="info-card">
+                        <h3>DOCKING STATION STATUS</h3>
+                        <p>Ready to deploy local resources into active experimental namespaces.</p>
+                    </div>
+
+                    <div class="action-section">
+                        <h3>LAUNCH EXPERIMENT</h3>
+                        <p class="section-desc">Deploy waiting bots to DIT Experiment Server.</p>
+                        <a href="http://localhost:8081" target="_blank" class="launch-btn retro-btn-cyan">OPEN DIT CONTROLLER</a>
+                    </div>
+
+                    <div class="action-section">
+                        <h3>SRE CHAOS CONTROL</h3>
+                        <button id="btn-chaos-halt" class="control-btn btn-danger">CHAOS HALT (EMERGENCY)</button>
+                        <button id="btn-chaos-bench" class="control-btn btn-warning">RUN SYSTEM AUDIT</button>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Script connection -->
+    <script src="/static/js/lobby.js"></script>
+</body>
+</html>
