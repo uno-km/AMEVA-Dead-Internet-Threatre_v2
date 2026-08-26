@@ -100,4 +100,13 @@ tests/test_recruitment_flow.py
 # Conversation logs & drafts
 talk/
 
-
+
+*.env
+*.env.*
+.env.local
+.env.prd
+.env.dev
+.env.docker
+secrets/
+*.pem
+*.key
